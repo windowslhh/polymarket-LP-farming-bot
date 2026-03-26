@@ -1,11 +1,12 @@
 """Entry point for Polymarket LP Farming Bot.
 
 Usage:
-    1. Copy .env.example to .env and set your PRIVATE_KEY
-    2. Adjust config/config.yaml to your preferences
-    3. Run: python main.py
+    python main.py              # Run in live mode
+    python main.py --dry-run    # Dry run (no real orders)
+    python main.py --report     # Show PnL report
 """
 
+import argparse
 import os
 import sys
 
@@ -15,16 +16,19 @@ from loguru import logger
 
 from src.bot import LPFarmingBot
 from src.client import PolymarketClient
+from src.pnl_tracker import PnLTracker
 
 
-def setup_logging():
+def setup_logging(debug: bool = False):
     """Configure loguru logger."""
-    logger.remove()  # Remove default handler
+    logger.remove()
+    level = "DEBUG" if debug else "INFO"
     logger.add(
         sys.stderr,
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
-        level="INFO",
+        level=level,
     )
+    os.makedirs("logs", exist_ok=True)
     logger.add(
         "logs/bot_{time:YYYY-MM-DD}.log",
         rotation="1 day",
@@ -40,9 +44,35 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+def show_report():
+    """Display PnL report without running the bot."""
+    tracker = PnLTracker()
+    print(tracker.get_daily_report())
+    print()
+    cumulative = tracker.get_cumulative_stats()
+    print("=== Cumulative Stats ===")
+    for key, value in cumulative.items():
+        label = key.replace("_", " ").title()
+        print(f"  {label}: {value}")
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Polymarket LP Farming Bot")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Calculate quotes without placing real orders")
+    parser.add_argument("--report", action="store_true",
+                        help="Show PnL report and exit")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug logging")
+    args = parser.parse_args()
+
     load_dotenv()
-    setup_logging()
+    setup_logging(debug=args.debug)
+
+    # Report mode
+    if args.report:
+        show_report()
+        return
 
     # Load config
     config = load_config()
@@ -71,7 +101,7 @@ def main():
         sys.exit(1)
 
     # Create and run bot
-    bot = LPFarmingBot(client=client, config=config)
+    bot = LPFarmingBot(client=client, config=config, dry_run=args.dry_run)
     bot.run()
 
 

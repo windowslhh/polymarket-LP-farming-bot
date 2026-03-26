@@ -2,11 +2,11 @@
 
 Runs the conservative LP farming strategy:
 1. Select best markets periodically
-2. Fetch orderbooks
+2. Fetch orderbooks (WebSocket or HTTP fallback)
 3. Calculate conservative quotes
 4. Apply risk checks
 5. Place/update orders
-6. Log status
+6. Track PnL and log status
 """
 
 import time
@@ -16,16 +16,20 @@ from loguru import logger
 from src.client import PolymarketClient
 from src.market_selector import ScoredMarket, select_markets
 from src.order_manager import OrderManager
+from src.pnl_tracker import PnLTracker
 from src.risk_manager import RiskManager
 from src.strategy import calculate_quotes, should_requote
+from src.websocket_client import PolymarketWebSocket
 
 
 class LPFarmingBot:
     """Conservative LP farming bot for Polymarket airdrop."""
 
-    def __init__(self, client: PolymarketClient, config: dict):
+    def __init__(self, client: PolymarketClient, config: dict,
+                 dry_run: bool = False):
         self.client = client
         self.config = config
+        self.dry_run = dry_run
 
         strategy_cfg = config.get("strategy", {})
         risk_cfg = config.get("risk", {})
@@ -39,23 +43,33 @@ class LPFarmingBot:
 
         self.order_manager = OrderManager(client)
         self.risk_manager = RiskManager(risk_cfg)
+        self.pnl_tracker = PnLTracker()
+        self.ws_client = PolymarketWebSocket()
 
         self.active_markets: list[ScoredMarket] = []
         self.last_midpoints: dict[str, float] = {}
         self.last_market_refresh: float = 0
+        self._tick_count = 0
         self._running = False
 
     def run(self):
         """Main bot loop."""
+        mode = "DRY RUN" if self.dry_run else "LIVE"
         logger.info("=" * 60)
-        logger.info("Polymarket LP Farming Bot starting")
+        logger.info(f"Polymarket LP Farming Bot starting [{mode}]")
         logger.info(f"Strategy: spread={self.spread_bps}bps, size=${self.order_size}, levels={self.order_levels}")
         logger.info("=" * 60)
+
+        if self.dry_run:
+            logger.info("DRY RUN mode: orders will be calculated but NOT placed")
 
         # Verify connection
         if not self.client.check_connection():
             logger.error("Cannot connect to Polymarket. Exiting.")
             return
+
+        # Start WebSocket for real-time data (optional)
+        self.ws_client.start()
 
         self._running = True
 
@@ -76,6 +90,8 @@ class LPFarmingBot:
 
     def _tick(self):
         """Single iteration of the main loop."""
+        self._tick_count += 1
+
         # Refresh market selection periodically
         if time.time() - self.last_market_refresh > self.market_refresh_interval:
             self._refresh_markets()
@@ -84,6 +100,9 @@ class LPFarmingBot:
             logger.warning("No markets selected. Waiting for next refresh...")
             return
 
+        # Check fills from previous cycle
+        self._check_fills()
+
         # Update quotes for each market
         for market in self.active_markets:
             try:
@@ -91,8 +110,16 @@ class LPFarmingBot:
             except Exception as e:
                 logger.error(f"Error updating {market.question[:30]}...: {e}")
 
+        # Update PnL tracker
+        self.pnl_tracker.update_active_markets(len(self.active_markets))
+
         # Log status every 10 ticks (~2.5 min at 15s interval)
-        self._log_status()
+        if self._tick_count % 10 == 0:
+            self._log_status()
+
+        # Save PnL data every 60 ticks (~15 min)
+        if self._tick_count % 60 == 0:
+            self.pnl_tracker.save()
 
     def _refresh_markets(self):
         """Fetch and score markets, select top ones."""
@@ -121,8 +148,14 @@ class LPFarmingBot:
             old_tokens = {m.token_id for m in self.active_markets}
             new_tokens = {m.token_id for m in new_markets}
             for token_id in old_tokens - new_tokens:
-                self.order_manager.cancel_all_token_orders(token_id)
+                if not self.dry_run:
+                    self.order_manager.cancel_all_token_orders(token_id)
+                self.ws_client.unsubscribe(token_id)
                 logger.info(f"Exited market {token_id[:8]}...")
+
+            # Subscribe new markets to WebSocket
+            for token_id in new_tokens - old_tokens:
+                self.ws_client.subscribe(token_id)
 
             self.active_markets = new_markets
             self.last_market_refresh = time.time()
@@ -134,15 +167,16 @@ class LPFarmingBot:
         """Update quotes for a single market."""
         token_id = market.token_id
 
-        # Get current midpoint
-        midpoint = self.client.get_midpoint(token_id)
+        # Get current midpoint (prefer WebSocket, fallback to HTTP)
+        midpoint = self._get_midpoint(token_id)
 
         # Risk check
         allowed, reason = self.risk_manager.can_trade(
             token_id, midpoint, market.days_to_expiry
         )
         if not allowed:
-            self.order_manager.cancel_all_token_orders(token_id)
+            if not self.dry_run:
+                self.order_manager.cancel_all_token_orders(token_id)
             logger.debug(f"Skipping {market.question[:30]}...: {reason}")
             return
 
@@ -161,25 +195,109 @@ class LPFarmingBot:
             inventory_skew=skew,
         )
 
-        # Place orders
-        self.order_manager.update_orders(token_id, quotes)
+        if self.dry_run:
+            # Log what we would do
+            for q in quotes.bids:
+                logger.debug(f"[DRY] Would BUY  {q.size:.1f} @ {q.price:.4f}")
+            for q in quotes.asks:
+                logger.debug(f"[DRY] Would SELL {q.size:.1f} @ {q.price:.4f}")
+        else:
+            self.order_manager.update_orders(token_id, quotes)
+
         self.last_midpoints[token_id] = midpoint
+
+    def _get_midpoint(self, token_id: str) -> float:
+        """Get midpoint from WebSocket cache or HTTP fallback."""
+        ws_mid = self.ws_client.get_midpoint(token_id)
+        if ws_mid is not None:
+            return ws_mid
+        return self.client.get_midpoint(token_id)
+
+    def _check_fills(self):
+        """Check for recent fills and update inventory/PnL."""
+        if self.dry_run:
+            return
+
+        try:
+            trades = self.client.get_trades()
+            if not trades:
+                return
+
+            # Build map of market names for logging
+            market_names = {m.token_id: m.question for m in self.active_markets}
+
+            for trade in trades:
+                token_id = trade.get("asset_id", "")
+                if token_id not in market_names:
+                    continue
+
+                side = trade.get("side", "").upper()
+                price = float(trade.get("price", 0))
+                size = float(trade.get("size", 0))
+
+                if price <= 0 or size <= 0:
+                    continue
+
+                midpoint = self.last_midpoints.get(token_id, price)
+
+                # Record in PnL tracker
+                self.pnl_tracker.record_fill(
+                    token_id=token_id,
+                    market_name=market_names.get(token_id, "Unknown"),
+                    side=side,
+                    price=price,
+                    size=size,
+                    midpoint=midpoint,
+                )
+
+                # Record in risk manager
+                usdc_amount = price * size
+                self.risk_manager.record_fill(
+                    token_id=token_id,
+                    side=side,
+                    usdc_amount=usdc_amount,
+                    fill_price=price,
+                    midpoint_at_fill=midpoint,
+                )
+
+        except Exception as e:
+            logger.debug(f"Fill check error: {e}")
 
     def _log_status(self):
         """Log current bot status."""
         risk_status = self.risk_manager.get_status()
         order_count = self.order_manager.get_active_order_count()
+        cumulative = self.pnl_tracker.get_cumulative_stats()
 
         logger.info(
             f"Status: markets={len(self.active_markets)}, "
             f"orders={order_count}, "
             f"daily_pnl=${risk_status['daily_pnl']:.2f}, "
             f"total_pos=${risk_status['total_position']:.0f}, "
-            f"paused={risk_status['markets_paused']}"
+            f"cumulative_pnl=${cumulative['total_pnl']:.2f}, "
+            f"days_active={cumulative['days_active']}"
         )
 
     def _shutdown(self):
-        """Clean shutdown: cancel all orders."""
-        logger.info("Cancelling all orders...")
-        self.order_manager.cancel_everything()
-        logger.info("Bot stopped. All orders cancelled.")
+        """Clean shutdown: cancel all orders, save data."""
+        logger.info("Shutting down...")
+
+        # Stop WebSocket
+        self.ws_client.stop()
+
+        # Cancel all orders
+        if not self.dry_run:
+            self.order_manager.cancel_everything()
+
+        # Save PnL data
+        self.pnl_tracker.save()
+
+        # Print daily report
+        report = self.pnl_tracker.get_daily_report()
+        logger.info(report)
+
+        # Print cumulative stats
+        cumulative = self.pnl_tracker.get_cumulative_stats()
+        logger.info(f"Cumulative: {cumulative}")
+
+        logger.info("Bot stopped.")
