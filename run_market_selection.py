@@ -132,10 +132,14 @@ def fetch_orderbooks_for_candidates(client, candidates: list[dict], max_fetch: i
 
         try:
             ob = client.get_order_book(tid)
-            orderbooks[tid] = ob
-            fetched += 1
-            if fetched % 10 == 0:
-                logger.info(f"  Fetched {fetched} orderbooks...")
+            # Verify orderbook has actual data
+            ob_bids = getattr(ob, "bids", None) or (ob.get("bids") if isinstance(ob, dict) else None)
+            ob_asks = getattr(ob, "asks", None) or (ob.get("asks") if isinstance(ob, dict) else None)
+            if ob_bids or ob_asks:
+                orderbooks[tid] = ob
+                fetched += 1
+                if fetched % 10 == 0:
+                    logger.info(f"  Fetched {fetched} orderbooks...")
             time.sleep(0.15)  # Rate limit
         except Exception:
             pass
@@ -406,39 +410,41 @@ def main():
         "min_days_to_expiry": 7,
     }
 
-    # === TWO-PASS APPROACH ===
-    # Pass 1: Quick score ALL markets WITHOUT orderbooks
-    logger.info(f"Pass 1: Quick scoring {len(markets)} markets (no orderbook fetch)...")
-    quick_scored = []
-    for m in markets:
-        s, ri, ci, vol = score_market(m, require_rewards=True)
-        quick_scored.append((m, s, ri, ci, vol))
+    # === THREE-PASS APPROACH ===
 
-    quick_scored.sort(key=lambda x: x[1], reverse=True)
-    candidates = [m for m, s, _, _, _ in quick_scored if s > 0]
-    logger.info(f"  {len(candidates)} markets passed initial filters")
-
-    # Pass 2: Fetch orderbooks ONLY for top candidates (saves API calls)
-    orderbooks = {}
-    if client and candidates:
-        n_fetch = min(len(candidates), args.top * 6)  # Fetch 6x the selection count
-        logger.info(f"Pass 2: Fetching orderbooks for top {n_fetch} candidates...")
-        orderbooks = fetch_orderbooks_for_candidates(client, candidates[:n_fetch * 2], max_fetch=n_fetch)
-        logger.info(f"  Fetched {len(orderbooks)} orderbooks")
-
-    # Final scoring with orderbook data
-    logger.info(f"Final scoring with competition data...")
+    # Pass 1: Quick score ALL markets (no API calls, no orderbooks)
+    logger.info(f"Pass 1: Quick scoring {len(markets)} markets...")
     all_scored = []
     for m in markets:
-        tokens = m.get("tokens", [])
-        tid = tokens[0].get("token_id", "") if tokens else ""
-        ob = orderbooks.get(tid)
-
-        s, ri, ci, vol = score_market(m, orderbook=ob, require_rewards=True)
+        s, ri, ci, vol = score_market(m, require_rewards=True)
         all_scored.append((m, s, ri, ci, vol))
 
     all_scored.sort(key=lambda x: x[1], reverse=True)
+    passed = sum(1 for _, s, _, _, _ in all_scored if s > 0)
+    logger.info(f"  {passed} markets passed filters")
 
+    # Pass 2: Fetch orderbooks for top candidates
+    orderbooks = {}
+    if client and passed > 0:
+        # Get top candidates (those with score > 0), take top 30
+        top_candidates = [m for m, s, _, _, _ in all_scored if s > 0][:30]
+        logger.info(f"Pass 2: Fetching orderbooks for top {len(top_candidates)} candidates...")
+        orderbooks = fetch_orderbooks_for_candidates(client, top_candidates, max_fetch=30)
+        logger.info(f"  Got {len(orderbooks)} orderbooks with data")
+
+    # Pass 3: Re-score with orderbook data, build final results
+    if orderbooks:
+        logger.info(f"Pass 3: Re-scoring with competition data...")
+        all_scored = []
+        for m in markets:
+            tokens = m.get("tokens", [])
+            tid = tokens[0].get("token_id", "") if tokens else ""
+            ob = orderbooks.get(tid)
+            s, ri, ci, vol = score_market(m, orderbook=ob, require_rewards=True)
+            all_scored.append((m, s, ri, ci, vol))
+        all_scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Final selection
     selected = select_markets(
         markets,
         max_markets=args.top,
