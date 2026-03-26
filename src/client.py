@@ -85,15 +85,40 @@ class PolymarketClient:
 
     # -- Market data (no auth required) --
 
-    def get_markets(self) -> list[dict]:
-        """Get all available markets."""
-        result = self._retry(self._client.get_markets)
-        return result if isinstance(result, list) else result.get("data", [])
+    def get_markets(self, max_pages: int = 5) -> list[dict]:
+        """Get all available markets with pagination."""
+        return self._paginate(self._client.get_markets, max_pages)
 
-    def get_simplified_markets(self) -> list[dict]:
-        """Get simplified market listing."""
-        result = self._retry(self._client.get_simplified_markets)
-        return result if isinstance(result, list) else result.get("data", [])
+    def get_simplified_markets(self, max_pages: int = 5) -> list[dict]:
+        """Get simplified market listing with pagination."""
+        return self._paginate(self._client.get_simplified_markets, max_pages)
+
+    def get_sampling_simplified_markets(self, max_pages: int = 3) -> list[dict]:
+        """Get sampling/rewards-eligible simplified markets."""
+        return self._paginate(self._client.get_sampling_simplified_markets, max_pages)
+
+    def get_sampling_markets(self, max_pages: int = 3) -> list[dict]:
+        """Get sampling/rewards-eligible markets (full detail)."""
+        return self._paginate(self._client.get_sampling_markets, max_pages)
+
+    def _paginate(self, api_func, max_pages: int = 5) -> list[dict]:
+        """Fetch paginated results from a CLOB API endpoint."""
+        all_data = []
+        cursor = "MA=="
+        for page in range(max_pages):
+            result = self._retry(api_func, cursor)
+            if isinstance(result, list):
+                all_data.extend(result)
+                break  # No pagination info
+            data = result.get("data", [])
+            if not data:
+                break
+            all_data.extend(data)
+            cursor = result.get("next_cursor", "")
+            if not cursor or cursor == "MA==":
+                break
+            logger.debug(f"Fetched page {page + 1}, {len(data)} markets (total: {len(all_data)})")
+        return all_data
 
     def get_orderbook(self, token_id: str) -> OrderBook:
         """Get order book for a token."""
