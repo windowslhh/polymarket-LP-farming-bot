@@ -1,15 +1,14 @@
 # Polymarket LP Farming Bot Configuration
 # Goal: Maximize airdrop eligibility while minimizing losses
+# Core: 高奖励 + 低波动 + 低竞争 (NOT chasing mainstream markets)
 
 polymarket:
   host: "https://clob.polymarket.com"
   chain_id: 137  # Polygon mainnet
-  # Signature type: 0 = EOA (MetaMask/Ledger), 1 = Email/Magic, 2 = Browser proxy
   signature_type: 0
 
 strategy:
   # Optimized via backtest (run_backtest.py --fast)
-  # Tighter spread + larger size = more fills + more LP rewards
   spread_bps: 200               # 2% spread (backtest optimal: 200 > 300 > 400)
   order_size_usdc: 50           # $50 per layer (backtest: 50 > 30 > 20)
   order_levels: 2               # 2 layers per side (backtest: 2 > 1)
@@ -17,20 +16,44 @@ strategy:
   market_refresh_interval_sec: 300  # How often to re-select markets (5 min)
 
 risk:
-  max_position_per_market: 300  # Max exposure per market (USDC) - raised for $50 orders
+  max_position_per_market: 300  # Max exposure per market (USDC)
   max_total_position: 1200      # Max total exposure (USDC)
-  daily_loss_limit: 15          # Stop trading if daily loss exceeds this (backtest: 15 == 30)
+  daily_loss_limit: 15          # Stop trading if daily loss exceeds this
   inventory_skew_limit: 100     # Pause one side if skew exceeds this
-  min_days_to_expiry: 5         # Skip markets expiring soon
-  min_probability: 0.10         # Skip extreme low probability
-  max_probability: 0.90         # Skip extreme high probability
+  min_days_to_expiry: 7         # Skip markets expiring soon (raised from 5)
+  min_probability: 0.15         # Skip extreme low probability (tighter: was 0.10)
+  max_probability: 0.85         # Skip extreme high probability (tighter: was 0.90)
   midpoint_change_pause_pct: 10 # Pause if midpoint moves >10% in 5 min
 
 market_selection:
   max_markets: 5                # Number of markets to trade simultaneously
-  min_daily_volume: 1000        # Minimum daily volume (USDC)
-  prefer_categories:            # Ordered by preference (rebate tier)
-    - "Finance"                 # 50% maker rebate
-    - "Politics"                # 25% maker rebate
-    - "Crypto"                  # 25% maker rebate, higher fees
-    - "Sports"                  # 25% maker rebate, lower fees
+  # --- Reward compliance ---
+  require_rewards: true         # ONLY trade markets with LP rewards (critical!)
+  min_reward_pool: 1.0          # Min daily reward pool (skip tiny pools)
+  max_reward_pool: 100.0        # Penalize above this (likely competitive mainstream)
+  # --- Volatility filter ---
+  max_volatility_cents: 8.0     # Max historical std dev in ¢/day (< 5¢ ideal)
+  # --- Volume thresholds ---
+  min_daily_volume: 200         # Lowered: niche markets have less volume
+  # --- Category priority ---
+  # New philosophy: niche/low-competition > mainstream/high-volume
+  # Tier 1 (best): Sports, Science, Weather, Culture
+  # Tier 2 (good): Finance, Economics, Tech
+  # Tier 3 (careful): Politics
+  # Tier 4 (avoid): Crypto (esp. Up/Down), Geopolitics
+  prefer_categories:
+    - "Sports"                  # Niche sports: low competition, predictable
+    - "Science"                 # Long cycle, almost no sudden news
+    - "Weather"                 # Very predictable, low competition
+    - "Culture"                 # Pop culture, slow-moving
+    - "Finance"                 # 50% rebate but more competitive
+    - "Economics"               # Decent rewards, medium competition
+    - "Tech"                    # SpaceX etc., long cycle
+  # --- Blacklist ---
+  avoid_categories:
+    - "Crypto Up/Down"          # Bot arms race, worst red ocean
+  avoid_keywords:
+    - "up or down"
+    - "above or below"
+    - "5-minute"
+    - "15-minute"

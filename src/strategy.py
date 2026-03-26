@@ -129,6 +129,34 @@ def should_requote(current_midpoint: float, last_midpoint: float,
     return change > threshold_bps / 10000
 
 
+def check_reward_compliance(
+    quotes: QuotePair,
+    max_spread: float = 0.04,
+    min_shares: float = 50.0,
+) -> tuple[bool, str]:
+    """Check if quotes comply with reward program requirements.
+
+    Returns (is_compliant, reason).
+    """
+    if not quotes.bids or not quotes.asks:
+        return False, "Missing bid or ask side"
+
+    # Check spread: best bid to best ask must be within max_spread
+    best_bid = max(q.price for q in quotes.bids)
+    best_ask = min(q.price for q in quotes.asks)
+    spread = best_ask - best_bid
+
+    if spread > max_spread:
+        return False, f"Spread {spread:.4f} exceeds max {max_spread:.4f}"
+
+    # Check min shares
+    for q in quotes.bids + quotes.asks:
+        if q.size < min_shares:
+            return False, f"Order size {q.size:.1f} below min {min_shares:.0f} shares"
+
+    return True, "OK"
+
+
 def _clamp_price(price: float) -> float:
     """Clamp price to valid Polymarket range."""
     return max(0.01, min(0.99, price))

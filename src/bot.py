@@ -18,7 +18,7 @@ from src.market_selector import ScoredMarket, select_markets
 from src.order_manager import OrderManager
 from src.pnl_tracker import PnLTracker
 from src.risk_manager import RiskManager
-from src.strategy import calculate_quotes, should_requote
+from src.strategy import calculate_quotes, check_reward_compliance, should_requote
 from src.websocket_client import PolymarketWebSocket
 
 
@@ -51,6 +51,9 @@ class LPFarmingBot:
         self.last_market_refresh: float = 0
         self._tick_count = 0
         self._running = False
+        # Price history for volatility estimation (token_id -> list of midpoints)
+        self._price_history: dict[str, list[float]] = {}
+        self._max_price_history = 288  # ~1 day at 5-min intervals
 
     def run(self):
         """Main bot loop."""
@@ -122,7 +125,11 @@ class LPFarmingBot:
             self.pnl_tracker.save()
 
     def _refresh_markets(self):
-        """Fetch and score markets, select top ones."""
+        """Fetch and score markets, select top ones.
+
+        Enhanced pipeline: fetches orderbooks for competition assessment
+        and uses cached price history for volatility estimation.
+        """
         logger.info("Refreshing market selection...")
         try:
             raw_markets = self.client.get_simplified_markets()
@@ -138,10 +145,33 @@ class LPFarmingBot:
                 "min_days_to_expiry": self.risk_manager.min_days_to_expiry,
             }
 
+            # Collect orderbook data for competition assessment
+            # Only fetch for candidate markets (those with tokens)
+            orderbooks = {}
+            price_histories = {}
+            for market in raw_markets[:50]:  # Limit API calls
+                tokens = market.get("tokens", [])
+                if tokens:
+                    tid = tokens[0].get("token_id", "")
+                    if tid:
+                        try:
+                            ob = self.client.get_orderbook(tid)
+                            orderbooks[tid] = {
+                                "bids": [{"price": b.price, "size": b.size} for b in ob.bids],
+                                "asks": [{"price": a.price, "size": a.size} for a in ob.asks],
+                            }
+                        except Exception:
+                            pass  # Skip if orderbook fetch fails
+                        # Use cached midpoint history for volatility
+                        if tid in self._price_history:
+                            price_histories[tid] = self._price_history[tid]
+
             new_markets = select_markets(
                 raw_markets,
                 max_markets=self.market_cfg.get("max_markets", 5),
                 config=selection_config,
+                orderbooks=orderbooks,
+                price_histories=price_histories,
             )
 
             # Cancel orders for markets we're no longer in
@@ -195,6 +225,27 @@ class LPFarmingBot:
             inventory_skew=skew,
         )
 
+        # Check reward compliance before placing orders
+        if market.reward_info.has_rewards:
+            compliant, reason = check_reward_compliance(
+                quotes,
+                max_spread=market.reward_info.max_spread,
+                min_shares=market.reward_info.min_shares,
+            )
+            if not compliant:
+                logger.warning(
+                    f"Quotes not reward-compliant for {market.question[:30]}...: {reason}. "
+                    f"Adjusting..."
+                )
+                # Try tighter spread to comply
+                quotes = calculate_quotes(
+                    midpoint=midpoint,
+                    spread_bps=min(self.spread_bps, int(market.reward_info.max_spread * 10000)),
+                    order_size=max(self.order_size, market.reward_info.min_shares * midpoint),
+                    order_levels=1,  # Single level for tighter compliance
+                    inventory_skew=skew,
+                )
+
         if self.dry_run:
             # Log what we would do
             for q in quotes.bids:
@@ -205,6 +256,13 @@ class LPFarmingBot:
             self.order_manager.update_orders(token_id, quotes)
 
         self.last_midpoints[token_id] = midpoint
+
+        # Track price history for volatility estimation
+        if token_id not in self._price_history:
+            self._price_history[token_id] = []
+        self._price_history[token_id].append(midpoint)
+        if len(self._price_history[token_id]) > self._max_price_history:
+            self._price_history[token_id] = self._price_history[token_id][-self._max_price_history:]
 
     def _get_midpoint(self, token_id: str) -> float:
         """Get midpoint from WebSocket cache or HTTP fallback."""

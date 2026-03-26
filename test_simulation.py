@@ -99,54 +99,72 @@ def test_risk_manager():
 
 
 def test_market_selector():
-    """Test market scoring and selection."""
-    from src.market_selector import score_market, select_markets
+    """Test market scoring and selection with new reward/volatility/competition logic."""
+    from src.market_selector import (
+        score_market, select_markets, assess_competition,
+        estimate_volatility, parse_reward_info,
+    )
 
     logger.info("=== Testing Market Selector ===")
 
-    # Create mock markets
+    # Create mock markets with reward info
     mock_markets = [
         {
-            "question": "Will BTC reach $100k by June 2026?",
+            "question": "Will BTC go up or down in the next 5 minutes?",  # Blacklisted keyword
             "category": "Crypto",
             "active": True,
             "volume_24h": 50000,
             "end_date_iso": "2026-06-30T00:00:00Z",
+            "rewards": {"total_rewards": 20, "max_spread": 0.04, "min_size": 50},
             "tokens": [
                 {"token_id": "token_btc_yes", "outcome": "Yes", "price": 0.45},
                 {"token_id": "token_btc_no", "outcome": "No", "price": 0.55},
             ],
         },
         {
+            "question": "Baylor Bears vs Minnesota - NCAA basketball",
+            "category": "Sports",
+            "active": True,
+            "volume_24h": 3000,
+            "end_date_iso": "2026-04-30T00:00:00Z",
+            "rewards": {"total_rewards": 8, "max_spread": 0.04, "min_size": 50},
+            "tokens": [
+                {"token_id": "token_ncaa_yes", "outcome": "Yes", "price": 0.55},
+                {"token_id": "token_ncaa_no", "outcome": "No", "price": 0.45},
+            ],
+        },
+        {
+            "question": "Will Arctic sea ice extent reach record low?",
+            "category": "Science",
+            "active": True,
+            "volume_24h": 800,
+            "end_date_iso": "2026-09-30T00:00:00Z",
+            "rewards": {"total_rewards": 5, "max_spread": 0.04, "min_size": 50},
+            "tokens": [
+                {"token_id": "token_ice_yes", "outcome": "Yes", "price": 0.40},
+                {"token_id": "token_ice_no", "outcome": "No", "price": 0.60},
+            ],
+        },
+        {
             "question": "Will S&P 500 close above 6000 this month?",
             "category": "Finance",
             "active": True,
-            "volume_24h": 30000,
+            "volume_24h": 80000,
             "end_date_iso": "2026-04-30T00:00:00Z",
+            "rewards": {"total_rewards": 50, "max_spread": 0.04, "min_size": 50},
             "tokens": [
                 {"token_id": "token_sp_yes", "outcome": "Yes", "price": 0.60},
                 {"token_id": "token_sp_no", "outcome": "No", "price": 0.40},
             ],
         },
         {
-            "question": "Will it rain in NYC tomorrow?",
-            "category": "Weather",
-            "active": True,
-            "volume_24h": 200,  # Low volume - should be filtered
-            "end_date_iso": "2026-03-27T00:00:00Z",
-            "tokens": [
-                {"token_id": "token_rain_yes", "outcome": "Yes", "price": 0.70},
-            ],
-        },
-        {
-            "question": "Who wins the next election?",
+            "question": "No rewards market - ignore this",
             "category": "Politics",
             "active": True,
-            "volume_24h": 100000,
-            "end_date_iso": "2026-11-03T00:00:00Z",
+            "volume_24h": 5000,
+            "end_date_iso": "2026-08-01T00:00:00Z",
             "tokens": [
-                {"token_id": "token_elect_yes", "outcome": "Yes", "price": 0.52},
-                {"token_id": "token_elect_no", "outcome": "No", "price": 0.48},
+                {"token_id": "token_noreward", "outcome": "Yes", "price": 0.50},
             ],
         },
         {
@@ -155,6 +173,7 @@ def test_market_selector():
             "active": True,
             "volume_24h": 15000,
             "end_date_iso": "2026-12-31T00:00:00Z",
+            "rewards": {"total_rewards": 10, "max_spread": 0.04, "min_size": 50},
             "tokens": [
                 {"token_id": "token_eth_yes", "outcome": "Yes", "price": 0.08},  # Too extreme
                 {"token_id": "token_eth_no", "outcome": "No", "price": 0.92},
@@ -162,23 +181,61 @@ def test_market_selector():
         },
     ]
 
+    # Test volatility estimation
+    stable_prices = [0.50 + 0.001 * (i % 5) for i in range(100)]  # Low volatility
+    volatile_prices = [0.50 + 0.05 * ((-1) ** i) for i in range(100)]  # High volatility
+    vol_stable = estimate_volatility(stable_prices)
+    vol_high = estimate_volatility(volatile_prices)
+    logger.info(f"  Volatility: stable={vol_stable:.2f}¢, volatile={vol_high:.2f}¢")
+    assert vol_stable < vol_high, "Stable should have lower volatility"
+
+    # Test competition assessment
+    shallow_book = {"bids": [{"price": "0.48", "size": "100"}], "asks": [{"price": "0.52", "size": "100"}]}
+    deep_book = {"bids": [{"price": str(0.50 - i*0.01), "size": "1000"} for i in range(10)],
+                 "asks": [{"price": str(0.50 + i*0.01), "size": "1000"} for i in range(10)]}
+    comp_shallow = assess_competition(shallow_book)
+    comp_deep = assess_competition(deep_book)
+    logger.info(f"  Competition: shallow={comp_shallow.competition_score:.2f}, deep={comp_deep.competition_score:.2f}")
+    assert comp_shallow.competition_score < comp_deep.competition_score, "Deep book = more competition"
+
+    # Test reward parsing
+    ri = parse_reward_info(mock_markets[1])
+    assert ri.has_rewards
+    assert ri.total_rewards == 8
+    logger.info(f"  Reward parsing: has_rewards={ri.has_rewards}, total={ri.total_rewards}")
+
+    ri_none = parse_reward_info(mock_markets[4])
+    assert not ri_none.has_rewards
+    logger.info(f"  No reward parsing: has_rewards={ri_none.has_rewards}")
+
     # Score individual markets
     for m in mock_markets:
-        s = score_market(m)
-        logger.info(f"  [{m['category']}] {m['question'][:40]}... score={s:.4f}")
+        s, ri, ci, vol = score_market(m, require_rewards=True)
+        label = "PASS" if s > 0 else "FILTERED"
+        logger.info(f"  [{label}] [{m['category']}] {m['question'][:45]}... score={s:.4f}")
 
-    # Select top markets
-    selected = select_markets(mock_markets, max_markets=3)
+    # Select top markets (require_rewards=True)
+    selected = select_markets(mock_markets, max_markets=3, config={"require_rewards": True})
     logger.info(f"  Selected {len(selected)} markets:")
     for m in selected:
-        logger.info(f"    {m.question[:40]}... score={m.score:.4f} cat={m.category}")
+        logger.info(f"    [{m.category}] {m.question[:45]}... score={m.score:.4f}")
 
-    # Verify filtering
-    assert len(selected) <= 3
-    # Low volume "rain" and extreme probability "ETH $10k" should be filtered
+    # Verify: blacklisted "up or down" should be filtered
     selected_questions = [m.question for m in selected]
-    assert not any("rain" in q.lower() for q in selected_questions), "Low volume should be filtered"
-    logger.info("  Filtering verified: low volume and extreme probability excluded")
+    assert not any("up or down" in q.lower() for q in selected_questions), "Blacklisted market should be filtered"
+    # Verify: no-reward market should be filtered
+    assert not any("No rewards" in q for q in selected_questions), "No-reward market should be filtered"
+    # Verify: extreme probability ETH should be filtered
+    assert not any("ETH hit" in q for q in selected_questions), "Extreme probability should be filtered"
+    # Verify: niche Sports/Science should rank high
+    if selected:
+        top_cats = [m.category for m in selected[:2]]
+        logger.info(f"  Top categories: {top_cats}")
+        assert any(c in ["Sports", "Science", "Weather"] for c in top_cats), \
+            f"Niche categories should rank high, got {top_cats}"
+
+    logger.info("  Filtering verified: blacklist, no-rewards, extreme prob excluded")
+    logger.info("  Ranking verified: niche categories prioritized over mainstream")
 
     logger.info("Market selector tests PASSED")
 
