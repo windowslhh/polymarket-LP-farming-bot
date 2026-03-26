@@ -110,19 +110,22 @@ def fetch_real_markets():
     if not all_markets:
         return None, None
 
-    # 2. Fetch orderbooks for top candidate markets (for competition assessment)
-    logger.info("Fetching orderbooks for competition assessment...")
+    return all_markets, client
+
+
+def fetch_orderbooks_for_candidates(client, candidates: list[dict], max_fetch: int = 30):
+    """Fetch orderbooks only for pre-scored top candidate markets.
+
+    Two-pass approach: score first without orderbooks, then fetch
+    orderbooks only for top candidates for accurate competition assessment.
+    """
     orderbooks = {}
     fetched = 0
-    for market in all_markets:
+
+    for market in candidates:
         tokens = market.get("tokens", [])
         if not tokens:
             continue
-
-        # Quick pre-filter: skip obviously bad markets
-        if _is_blacklisted(market):
-            continue
-
         tid = tokens[0].get("token_id", "")
         if not tid:
             continue
@@ -133,16 +136,14 @@ def fetch_real_markets():
             fetched += 1
             if fetched % 10 == 0:
                 logger.info(f"  Fetched {fetched} orderbooks...")
-            time.sleep(0.2)  # Rate limit
+            time.sleep(0.15)  # Rate limit
         except Exception:
             pass
 
-        if fetched >= 60:  # Limit API calls
+        if fetched >= max_fetch:
             break
 
-    logger.info(f"Fetched {fetched} orderbooks")
-
-    return all_markets, orderbooks
+    return orderbooks
 
 
 def generate_mock_markets():
@@ -367,23 +368,22 @@ def main():
     # Fetch data
     use_mock = args.mock
     markets = None
-    orderbooks = None
+    client = None
 
     if not use_mock:
         try:
-            markets, orderbooks = fetch_real_markets()
+            markets, client = fetch_real_markets()
         except Exception as e:
             logger.error(f"Real API failed: {e}")
             markets = None
 
         if not markets:
             logger.warning("Cannot reach Polymarket API. Falling back to mock data...")
-            logger.warning("To use real data, run this script on a machine with internet access.")
             use_mock = True
 
     if use_mock:
         logger.info("Using MOCK data for demonstration")
-        markets, orderbooks = generate_mock_markets()
+        markets, _ = generate_mock_markets()
 
     if not markets:
         logger.error("No market data available")
@@ -395,22 +395,6 @@ def main():
             json.dump({"markets": markets, "count": len(markets)}, f, indent=2, default=str)
         logger.info(f"Saved raw market data to {args.save}")
 
-    # Score all markets
-    logger.info(f"Scoring {len(markets)} markets...")
-    all_scored = []
-    for m in markets:
-        tokens = m.get("tokens", [])
-        tid = tokens[0].get("token_id", "") if tokens else ""
-        ob = orderbooks.get(tid) if orderbooks else None
-
-        s, ri, ci, vol = score_market(
-            m, orderbook=ob, require_rewards=True,
-        )
-        all_scored.append((m, s, ri, ci, vol))
-
-    all_scored.sort(key=lambda x: x[1], reverse=True)
-
-    # Select top markets
     config = {
         "require_rewards": True,
         "min_reward_pool": 1.0,
@@ -422,11 +406,44 @@ def main():
         "min_days_to_expiry": 7,
     }
 
+    # === TWO-PASS APPROACH ===
+    # Pass 1: Quick score ALL markets WITHOUT orderbooks
+    logger.info(f"Pass 1: Quick scoring {len(markets)} markets (no orderbook fetch)...")
+    quick_scored = []
+    for m in markets:
+        s, ri, ci, vol = score_market(m, require_rewards=True)
+        quick_scored.append((m, s, ri, ci, vol))
+
+    quick_scored.sort(key=lambda x: x[1], reverse=True)
+    candidates = [m for m, s, _, _, _ in quick_scored if s > 0]
+    logger.info(f"  {len(candidates)} markets passed initial filters")
+
+    # Pass 2: Fetch orderbooks ONLY for top candidates (saves API calls)
+    orderbooks = {}
+    if client and candidates:
+        n_fetch = min(len(candidates), args.top * 6)  # Fetch 6x the selection count
+        logger.info(f"Pass 2: Fetching orderbooks for top {n_fetch} candidates...")
+        orderbooks = fetch_orderbooks_for_candidates(client, candidates[:n_fetch * 2], max_fetch=n_fetch)
+        logger.info(f"  Fetched {len(orderbooks)} orderbooks")
+
+    # Final scoring with orderbook data
+    logger.info(f"Final scoring with competition data...")
+    all_scored = []
+    for m in markets:
+        tokens = m.get("tokens", [])
+        tid = tokens[0].get("token_id", "") if tokens else ""
+        ob = orderbooks.get(tid)
+
+        s, ri, ci, vol = score_market(m, orderbook=ob, require_rewards=True)
+        all_scored.append((m, s, ri, ci, vol))
+
+    all_scored.sort(key=lambda x: x[1], reverse=True)
+
     selected = select_markets(
         markets,
         max_markets=args.top,
         config=config,
-        orderbooks=orderbooks or {},
+        orderbooks=orderbooks,
     )
 
     # Display results
