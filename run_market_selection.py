@@ -33,7 +33,8 @@ logger.add(
 
 from src.market_selector import (
     score_market, select_markets, assess_competition,
-    estimate_volatility, _is_blacklisted,
+    estimate_volatility, _is_blacklisted, _get_category,
+    _get_days_to_expiry,
 )
 
 
@@ -57,13 +58,14 @@ def fetch_real_markets():
         logger.error(f"Cannot connect to API: {e}")
         return None, None
 
-    # 1. Fetch sampling markets (these are reward-eligible)
-    logger.info("Fetching sampling/rewards markets...")
+    # 1. Fetch sampling markets with FULL detail (includes question, tags, end_date)
+    #    Use get_sampling_markets (NOT simplified) to get all fields
+    logger.info("Fetching sampling/rewards markets (full detail)...")
     all_markets = []
     cursor = "MA=="
     for page in range(10):  # Up to 10 pages
         try:
-            result = client.get_sampling_simplified_markets(cursor)
+            result = client.get_sampling_markets(cursor)
         except Exception as e:
             logger.warning(f"Page {page + 1} failed: {e}")
             break
@@ -87,7 +89,7 @@ def fetch_real_markets():
         cursor = "MA=="
         for page in range(5):
             try:
-                result = client.get_simplified_markets(cursor)
+                result = client.get_markets(cursor)
             except Exception as e:
                 logger.warning(f"Page {page + 1} failed: {e}")
                 break
@@ -261,7 +263,7 @@ def display_results(all_scored, selected, show_all=False):
 
     display = all_scored if show_all else all_scored[:20]
     for i, (m, s, ri, ci, vol) in enumerate(display):
-        cat = m.get("category", "?")
+        cat = _get_category(m)
         tokens = m.get("tokens", [])
         mid = float(tokens[0].get("price", 0)) if tokens else 0
         question = m.get("question", "?")[:50]
@@ -319,12 +321,11 @@ def display_results(all_scored, selected, show_all=False):
             mid = float(tokens[0].get("price", 0)) if tokens else 0
             if mid < 0.15 or mid > 0.85:
                 reasons.append(f"prob={mid:.2f}")
-            from src.market_selector import _get_days_to_expiry
             dte = _get_days_to_expiry(m)
             if dte < 7:
                 reasons.append(f"expiry={dte:.0f}d")
             reason_str = ", ".join(reasons) if reasons else "low score"
-            print(f"  ✗ [{m.get('category', '?'):<12}] {m.get('question', '?')[:45]:<45} → {reason_str}")
+            print(f"  ✗ [{_get_category(m):<12}] {m.get('question', '?')[:45]:<45} → {reason_str}")
         if len(filtered) > 10:
             print(f"  ... and {len(filtered) - 10} more")
 

@@ -165,43 +165,76 @@ def estimate_volatility(price_history: list[float] | None) -> float:
 def parse_reward_info(market: dict) -> RewardInfo:
     """Extract reward program info from market data.
 
-    Checks if market is in the rewards program and extracts parameters.
+    Real Polymarket API format:
+    {
+      "rewards": {
+        "rates": [{"asset_address": "...", "rewards_daily_rate": 1}],
+        "min_size": 20,
+        "max_spread": 3.5   # In CENTS (3.5 = 3.5¢ = 0.035 in decimal)
+      }
+    }
     """
-    # Try various field names that Polymarket API might use
     rewards = market.get("rewards", {})
-    if isinstance(rewards, dict) and rewards:
-        return RewardInfo(
-            total_rewards=float(rewards.get("total_rewards", 0) or rewards.get("rates", [{}])[0].get("rewards_daily_rate", 0)),
-            max_spread=float(rewards.get("max_spread", 0.04)),
-            min_shares=float(rewards.get("min_size", 50)),
-            has_rewards=True,
-        )
+    if not rewards or not isinstance(rewards, dict):
+        return RewardInfo(has_rewards=False)
 
-    # Fallback: check for reward-related fields at top level
-    if market.get("rewards_daily_rate") or market.get("reward_rate"):
-        rate = float(market.get("rewards_daily_rate", 0) or market.get("reward_rate", 0))
-        return RewardInfo(
-            total_rewards=rate,
-            max_spread=float(market.get("rewards_max_spread", 0.04)),
-            min_shares=float(market.get("rewards_min_size", 50)),
-            has_rewards=rate > 0,
-        )
+    # Extract daily reward rate from rates array
+    total_rewards = 0.0
+    rates = rewards.get("rates", [])
+    if isinstance(rates, list) and rates:
+        for rate_entry in rates:
+            if isinstance(rate_entry, dict):
+                total_rewards += float(rate_entry.get("rewards_daily_rate", 0))
 
-    # Check if market has any indication of being in rewards program
-    if market.get("has_rewards") or market.get("in_rewards_program"):
-        return RewardInfo(
-            total_rewards=float(market.get("daily_reward_amount", 1.0)),
-            max_spread=0.04,
-            min_shares=50,
-            has_rewards=True,
-        )
+    # Fallback: try direct total_rewards field (mock data compat)
+    if total_rewards == 0:
+        total_rewards = float(rewards.get("total_rewards", 0))
 
-    return RewardInfo(has_rewards=False)
+    if total_rewards <= 0:
+        return RewardInfo(has_rewards=False)
+
+    # max_spread: API returns in CENTS (e.g., 3.5 = 3.5¢)
+    # Convert to decimal for internal use (3.5 -> 0.035)
+    raw_max_spread = float(rewards.get("max_spread", 4.0))
+    if raw_max_spread > 1:
+        # API format: cents (3.5 = 3.5¢)
+        max_spread = raw_max_spread / 100.0
+    else:
+        # Already in decimal (mock data compat: 0.04)
+        max_spread = raw_max_spread
+
+    min_shares = float(rewards.get("min_size", 20))
+
+    return RewardInfo(
+        total_rewards=total_rewards,
+        max_spread=max_spread,
+        min_shares=min_shares,
+        has_rewards=True,
+    )
+
+
+def _get_category(market: dict) -> str:
+    """Extract category from market data.
+
+    Real API uses 'tags' array (first tag is primary category).
+    Mock data uses 'category' field directly.
+    """
+    # Real API: tags array
+    tags = market.get("tags", [])
+    if tags and isinstance(tags, list):
+        # First tag is usually the primary category
+        # Skip generic tags like "All"
+        for tag in tags:
+            if tag and tag != "All":
+                return tag
+
+    # Fallback: direct category field (mock data compat)
+    return market.get("category", "Other")
 
 
 def _is_blacklisted(market: dict) -> bool:
     """Check if market should be avoided entirely."""
-    category = market.get("category", "")
+    category = _get_category(market)
     question = market.get("question", "").lower()
 
     # Category blacklist
@@ -261,7 +294,7 @@ def score_market(
     midpoint = _get_midpoint(market)
     days_to_expiry = _get_days_to_expiry(market)
     daily_volume = _get_daily_volume(market)
-    category = market.get("category", "Other")
+    category = _get_category(market)
 
     # 3. Probability range (tighter than before: 15-85% for safety)
     if midpoint < min_probability or midpoint > max_probability:
@@ -271,8 +304,9 @@ def score_market(
     if days_to_expiry < min_days_to_expiry:
         return empty
 
-    # 5. Minimum activity (lowered - niche markets have less volume)
-    if daily_volume < min_daily_volume:
+    # 5. Minimum activity (skip filter if volume data not available)
+    #    Real API sampling markets don't always include volume
+    if daily_volume > 0 and daily_volume < min_daily_volume:
         return empty
 
     # 6. Market must be active
@@ -437,7 +471,7 @@ def select_markets(
             condition_id=market.get("condition_id", ""),
             question=market.get("question", "Unknown"),
             outcome=tokens[0].get("outcome", "Yes"),
-            category=market.get("category", "Other"),
+            category=_get_category(market),
             midpoint=_get_midpoint(market),
             daily_volume=_get_daily_volume(market),
             days_to_expiry=_get_days_to_expiry(market),
