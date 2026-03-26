@@ -92,19 +92,32 @@ CATEGORY_PRIORITY = {
 }
 
 
-def assess_competition(orderbook: dict | None) -> CompetitionInfo:
+def _ob_entry_val(entry, key: str) -> float:
+    """Extract a float value from an orderbook entry (dict or object)."""
+    if isinstance(entry, dict):
+        return float(entry.get(key, 0))
+    return float(getattr(entry, key, 0) or 0)
+
+
+def assess_competition(orderbook) -> CompetitionInfo:
     """Assess competition level from orderbook data.
 
+    Accepts dict, OrderBookSummary, or None.
     Low competition = shallow order book = better for small capital.
     """
     if not orderbook:
         return CompetitionInfo(competition_score=0.5)  # Unknown, assume medium
 
-    bids = orderbook.get("bids", [])
-    asks = orderbook.get("asks", [])
+    # Handle both dict and OrderBookSummary object
+    if isinstance(orderbook, dict):
+        bids = orderbook.get("bids", []) or []
+        asks = orderbook.get("asks", []) or []
+    else:
+        bids = getattr(orderbook, "bids", []) or []
+        asks = getattr(orderbook, "asks", []) or []
 
-    bid_depth = sum(float(b.get("size", 0)) * float(b.get("price", 0)) for b in bids)
-    ask_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0)) for a in asks)
+    bid_depth = sum(_ob_entry_val(b, "size") * _ob_entry_val(b, "price") for b in bids)
+    ask_depth = sum(_ob_entry_val(a, "size") * _ob_entry_val(a, "price") for a in asks)
     total_depth = bid_depth + ask_depth
 
     num_bid_levels = len(bids)
