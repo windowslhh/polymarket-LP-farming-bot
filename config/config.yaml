@@ -1,0 +1,34 @@
+# Polymarket LP Farming Bot Configuration
+# Goal: Maximize airdrop eligibility while minimizing losses
+
+polymarket:
+  host: "https://clob.polymarket.com"
+  chain_id: 137  # Polygon mainnet
+  # Signature type: 0 = EOA (MetaMask/Ledger), 1 = Email/Magic, 2 = Browser proxy
+  signature_type: 0
+
+strategy:
+  spread_bps: 300               # 3% spread - conservative to avoid adverse selection
+  order_size_usdc: 30           # Small size per order layer
+  order_levels: 2               # Layers per side (bid/ask)
+  refresh_interval_sec: 15      # How often to refresh quotes
+  market_refresh_interval_sec: 300  # How often to re-select markets (5 min)
+
+risk:
+  max_position_per_market: 200  # Max exposure per market (USDC)
+  max_total_position: 800       # Max total exposure (USDC)
+  daily_loss_limit: 20          # Stop trading if daily loss exceeds this
+  inventory_skew_limit: 100     # Pause one side if skew exceeds this
+  min_days_to_expiry: 5         # Skip markets expiring soon
+  min_probability: 0.10         # Skip extreme low probability
+  max_probability: 0.90         # Skip extreme high probability
+  midpoint_change_pause_pct: 10 # Pause if midpoint moves >10% in 5 min
+
+market_selection:
+  max_markets: 5                # Number of markets to trade simultaneously
+  min_daily_volume: 1000        # Minimum daily volume (USDC)
+  prefer_categories:            # Ordered by preference (rebate tier)
+    - "Finance"                 # 50% maker rebate
+    - "Politics"                # 25% maker rebate
+    - "Crypto"                  # 25% maker rebate, higher fees
+    - "Sports"                  # 25% maker rebate, lower fees
