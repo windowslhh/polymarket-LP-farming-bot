@@ -84,6 +84,12 @@ def main():
         logger.error("PRIVATE_KEY not set in .env file. See .env.example")
         sys.exit(1)
 
+    # Security checks before doing anything with the key
+    from src.security import run_all_checks
+    if not run_all_checks(private_key):
+        logger.error("Security checks failed. Fix issues above before running.")
+        sys.exit(1)
+
     # Initialize client
     client = PolymarketClient(
         host=poly_cfg.get("host", "https://clob.polymarket.com"),
