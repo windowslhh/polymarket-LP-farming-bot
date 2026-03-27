@@ -250,11 +250,40 @@ class LPFarmingBot:
         )
 
         if self.dry_run:
-            # Log what we would do
+            # Verify reward compliance
+            compliant = True
+            compliance_note = "OK"
+            if market.reward_info.has_rewards:
+                from src.strategy import check_reward_compliance
+                compliant, compliance_note = check_reward_compliance(
+                    quotes, market.reward_info.max_spread, market.reward_info.min_shares
+                )
+
+            # Calculate actual spread from quotes
+            if quotes.bids and quotes.asks:
+                actual_spread_bps = int((quotes.asks[0].price - quotes.bids[0].price) * 10000)
+                max_spread_bps = int(market.reward_info.max_spread * 10000) if market.reward_info.has_rewards else 9999
+                spread_ok = "✓" if actual_spread_bps <= max_spread_bps else "✗"
+            else:
+                actual_spread_bps = 0
+                spread_ok = "?"
+
+            bid_sizes = [q.size for q in quotes.bids]
+            ask_sizes = [q.size for q in quotes.asks]
+            min_size = min(bid_sizes + ask_sizes) if (bid_sizes or ask_sizes) else 0
+            size_ok = "✓" if min_size >= market.reward_info.min_shares else "✗"
+
+            logger.info(
+                f"[DRY] {market.question[:45]}\n"
+                f"       mid={midpoint:.3f}  spread={actual_spread_bps}bps{spread_ok}(max={max_spread_bps}bps)"
+                f"  size={min_size:.0f}{size_ok}(min={market.reward_info.min_shares:.0f})"
+                f"  reward={market.reward_info.total_rewards:.0f}/day"
+                f"  compliant={'YES' if compliant else 'NO: '+compliance_note}"
+            )
             for q in quotes.bids:
-                logger.debug(f"[DRY] Would BUY  {q.size:.1f} @ {q.price:.4f}")
+                logger.info(f"         BUY  {q.size:6.1f} shares @ {q.price:.4f}  (${q.size * q.price:.1f} USDC)")
             for q in quotes.asks:
-                logger.debug(f"[DRY] Would SELL {q.size:.1f} @ {q.price:.4f}")
+                logger.info(f"         SELL {q.size:6.1f} shares @ {q.price:.4f}  (${q.size * q.price:.1f} USDC)")
         else:
             self.order_manager.update_orders(token_id, quotes)
 
