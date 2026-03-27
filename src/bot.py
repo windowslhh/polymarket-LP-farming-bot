@@ -198,6 +198,7 @@ class LPFarmingBot:
                 logger.info(f"Exited market {token_id[:8]}...")
 
             # Subscribe new markets to WebSocket
+            old_tokens = set(old_market_map.keys())
             for token_id in new_tokens - old_tokens:
                 self.ws_client.subscribe(token_id)
 
