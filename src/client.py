@@ -12,6 +12,65 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 
+# Polygon mainnet contract addresses
+_CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+_USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+_POLYGON_RPC = "https://polygon-rpc.com"
+_USDC_DECIMALS = 6  # USDC and CTF conditional tokens both use 6 decimals
+
+# Minimal ABI for CTF split/merge and ERC20 approve
+_CTF_ABI = [
+    {
+        "name": "splitPosition",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "collateralToken", "type": "address"},
+            {"name": "parentCollectionId", "type": "bytes32"},
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "partition", "type": "uint256[]"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [],
+    },
+    {
+        "name": "mergePositions",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "collateralToken", "type": "address"},
+            {"name": "parentCollectionId", "type": "bytes32"},
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "partition", "type": "uint256[]"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [],
+    },
+]
+
+_ERC20_ABI = [
+    {
+        "name": "approve",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [{"type": "bool"}],
+    },
+    {
+        "name": "allowance",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "outputs": [{"type": "uint256"}],
+    },
+]
+
 
 @dataclass
 class MarketInfo:
@@ -50,6 +109,7 @@ class PolymarketClient:
     def __init__(self, host: str, private_key: str, chain_id: int = POLYGON,
                  signature_type: int = 0, funder: str | None = None):
         self.host = host
+        self._private_key = private_key  # kept in memory for on-chain txns only
         self._client = ClobClient(
             host,
             key=private_key,
@@ -58,6 +118,7 @@ class PolymarketClient:
             funder=funder,
         )
         self._api_creds = None
+        self._w3 = None  # lazy-init web3 only when needed
 
     def authenticate(self):
         """Derive L2 API credentials from private key."""
@@ -185,6 +246,172 @@ class PolymarketClient:
     def get_trades(self) -> list[dict]:
         """Get trade history."""
         return self._retry(self._client.get_trades)
+
+    # -- Token balances and on-chain operations --
+
+    def get_usdc_balance(self) -> float:
+        """Get available USDC balance (in dollars)."""
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            result = self._retry(self._client.get_balance_allowance, params)
+            raw = int(result.get("balance", 0))
+            return raw / 10 ** _USDC_DECIMALS
+        except Exception as e:
+            logger.warning(f"Could not fetch USDC balance: {e}")
+            return 0.0
+
+    def get_conditional_balance(self, token_id: str) -> float:
+        """Get YES/NO conditional token balance (in shares)."""
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+            )
+            result = self._retry(self._client.get_balance_allowance, params)
+            raw = int(result.get("balance", 0))
+            return raw / 10 ** _USDC_DECIMALS
+        except Exception as e:
+            logger.warning(f"Could not fetch conditional balance for {token_id[:8]}...: {e}")
+            return 0.0
+
+    def _get_w3(self):
+        """Lazy-init Web3 connection."""
+        if self._w3 is None:
+            from web3 import Web3
+            self._w3 = Web3(Web3.HTTPProvider(_POLYGON_RPC))
+        return self._w3
+
+    def _get_wallet_address(self) -> str:
+        """Derive wallet address from private key."""
+        w3 = self._get_w3()
+        account = w3.eth.account.from_key(self._private_key)
+        return account.address
+
+    def split_position(self, condition_id: str, amount_usdc: float) -> bool:
+        """Split USDC into equal YES + NO tokens.
+
+        1 USDC → 1 YES token + 1 NO token
+        Requires USDC allowance for CTF contract.
+
+        Args:
+            condition_id: The market's condition ID (hex string).
+            amount_usdc: Amount of USDC to split (in dollars).
+
+        Returns:
+            True on success.
+        """
+        if amount_usdc <= 0:
+            return True
+
+        w3 = self._get_w3()
+        wallet = self._get_wallet_address()
+        amount_raw = int(amount_usdc * 10 ** _USDC_DECIMALS)
+
+        usdc = w3.eth.contract(
+            address=w3.to_checksum_address(_USDC_ADDRESS),
+            abi=_ERC20_ABI,
+        )
+        ctf = w3.eth.contract(
+            address=w3.to_checksum_address(_CTF_ADDRESS),
+            abi=_CTF_ABI,
+        )
+
+        # Ensure CTF has USDC allowance
+        allowance = usdc.functions.allowance(wallet, _CTF_ADDRESS).call()
+        if allowance < amount_raw:
+            logger.info(f"Approving CTF to spend ${amount_usdc:.2f} USDC...")
+            approve_tx = usdc.functions.approve(
+                w3.to_checksum_address(_CTF_ADDRESS),
+                2 ** 256 - 1,  # max approval
+            ).build_transaction({
+                "from": wallet,
+                "nonce": w3.eth.get_transaction_count(wallet),
+                "gas": 100_000,
+                "gasPrice": w3.eth.gas_price,
+            })
+            signed = w3.eth.account.sign_transaction(approve_tx, self._private_key)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+            logger.info("USDC approval confirmed")
+
+        # condition_id as bytes32
+        cid_bytes = bytes.fromhex(condition_id.replace("0x", "").zfill(64))
+
+        logger.info(f"Splitting ${amount_usdc:.2f} USDC into YES+NO tokens for {condition_id[:10]}...")
+        split_tx = ctf.functions.splitPosition(
+            w3.to_checksum_address(_USDC_ADDRESS),  # collateral
+            b"\x00" * 32,                            # parentCollectionId = bytes32(0)
+            cid_bytes,                               # conditionId
+            [1, 2],                                  # binary partition: [YES, NO]
+            amount_raw,
+        ).build_transaction({
+            "from": wallet,
+            "nonce": w3.eth.get_transaction_count(wallet),
+            "gas": 300_000,
+            "gasPrice": w3.eth.gas_price,
+        })
+        signed = w3.eth.account.sign_transaction(split_tx, self._private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+        if receipt.status == 1:
+            logger.info(f"Split confirmed: ${amount_usdc:.2f} USDC → {amount_usdc:.2f} YES + {amount_usdc:.2f} NO")
+            return True
+        else:
+            logger.error(f"Split transaction failed: {tx_hash.hex()}")
+            return False
+
+    def merge_positions(self, condition_id: str, amount: float) -> bool:
+        """Merge equal YES + NO tokens back into USDC.
+
+        1 YES + 1 NO → 1 USDC
+        Used to clean up inventory when exiting a market.
+
+        Args:
+            condition_id: The market's condition ID.
+            amount: Number of token pairs to merge (= USDC recovered).
+
+        Returns:
+            True on success.
+        """
+        if amount <= 0:
+            return True
+
+        w3 = self._get_w3()
+        wallet = self._get_wallet_address()
+        amount_raw = int(amount * 10 ** _USDC_DECIMALS)
+        cid_bytes = bytes.fromhex(condition_id.replace("0x", "").zfill(64))
+
+        ctf = w3.eth.contract(
+            address=w3.to_checksum_address(_CTF_ADDRESS),
+            abi=_CTF_ABI,
+        )
+
+        logger.info(f"Merging {amount:.2f} YES+NO → ${amount:.2f} USDC for {condition_id[:10]}...")
+        merge_tx = ctf.functions.mergePositions(
+            w3.to_checksum_address(_USDC_ADDRESS),
+            b"\x00" * 32,
+            cid_bytes,
+            [1, 2],
+            amount_raw,
+        ).build_transaction({
+            "from": wallet,
+            "nonce": w3.eth.get_transaction_count(wallet),
+            "gas": 300_000,
+            "gasPrice": w3.eth.gas_price,
+        })
+        signed = w3.eth.account.sign_transaction(merge_tx, self._private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+        if receipt.status == 1:
+            logger.info(f"Merge confirmed: {amount:.2f} YES+NO → ${amount:.2f} USDC")
+            return True
+        else:
+            logger.error(f"Merge transaction failed: {tx_hash.hex()}")
+            return False
 
     # -- Utilities --
 

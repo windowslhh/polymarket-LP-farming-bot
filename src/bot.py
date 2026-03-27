@@ -181,12 +181,16 @@ class LPFarmingBot:
                 price_histories=price_histories,
             )
 
-            # Cancel orders for markets we're no longer in
-            old_tokens = {m.token_id for m in self.active_markets}
+            # Cancel orders and clean up inventory for markets we're no longer in
+            old_market_map = {m.token_id: m for m in self.active_markets}
             new_tokens = {m.token_id for m in new_markets}
-            for token_id in old_tokens - new_tokens:
+            for token_id, old_market in old_market_map.items():
+                if token_id in new_tokens:
+                    continue
                 if not self.dry_run:
                     self.order_manager.cancel_all_token_orders(token_id)
+                    # Merge remaining YES+NO pairs back to USDC
+                    self._try_merge_inventory(old_market)
                 self.ws_client.unsubscribe(token_id)
                 logger.info(f"Exited market {token_id[:8]}...")
 
@@ -287,7 +291,12 @@ class LPFarmingBot:
             for q in quotes.asks:
                 logger.info(f"         SELL {q.size:6.1f} shares @ {q.price:.4f}  (${q.size * q.price:.1f} USDC)")
         else:
-            self.order_manager.update_orders(token_id, quotes)
+            self.order_manager.update_orders(
+                token_id,
+                quotes,
+                condition_id=market.condition_id,
+                midpoint=midpoint,
+            )
 
         self.last_midpoints[token_id] = midpoint
 
@@ -297,6 +306,27 @@ class LPFarmingBot:
         self._price_history[token_id].append(midpoint)
         if len(self._price_history[token_id]) > self._max_price_history:
             self._price_history[token_id] = self._price_history[token_id][-self._max_price_history:]
+
+    def _try_merge_inventory(self, market: "ScoredMarket"):
+        """After exiting a market, merge remaining YES+NO pairs back to USDC."""
+        try:
+            yes_bal = self.client.get_conditional_balance(market.token_id)
+            if market.complement_token_id:
+                no_bal = self.client.get_conditional_balance(market.complement_token_id)
+            else:
+                no_bal = yes_bal  # assume balanced if no complement info
+
+            # Can only merge the amount we have on both sides
+            mergeable = min(yes_bal, no_bal)
+            if mergeable >= 1.0:  # Only worth merging if at least $1 recoverable
+                self.client.merge_positions(market.condition_id, mergeable)
+            elif mergeable > 0:
+                logger.debug(
+                    f"Skipping merge for {market.question[:30]}...: "
+                    f"only {mergeable:.2f} pairs (< $1)"
+                )
+        except Exception as e:
+            logger.warning(f"Merge inventory failed for {market.token_id[:8]}...: {e}")
 
     def _get_midpoint(self, token_id: str) -> float:
         """Get midpoint from WebSocket cache or HTTP fallback."""

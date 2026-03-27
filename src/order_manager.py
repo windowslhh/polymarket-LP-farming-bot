@@ -34,16 +34,71 @@ class OrderManager:
         self.total_fills_buy: float = 0.0
         self.total_fills_sell: float = 0.0
 
-    def update_orders(self, token_id: str, quotes: QuotePair):
+    def ensure_ask_inventory(
+        self,
+        token_id: str,
+        condition_id: str,
+        needed_shares: float,
+        midpoint: float,
+    ) -> bool:
+        """Ensure enough YES tokens exist for ASK orders.
+
+        If balance is insufficient, split USDC → YES + NO tokens.
+        Adds a 20% buffer to reduce how often we need to split.
+
+        Returns True if inventory is ready, False if split failed.
+        """
+        current = self.client.get_conditional_balance(token_id)
+        if current >= needed_shares:
+            return True  # Already have enough
+
+        shortage = needed_shares - current
+        # Add 20% buffer so we don't split again immediately
+        to_split_shares = shortage * 1.2
+        # USDC needed = shares × ~1.0 (1 USDC splits into 1 YES + 1 NO)
+        # Use midpoint to approximate but split 1:1 (1 USDC → 1 YES + 1 NO)
+        to_split_usdc = to_split_shares  # 1 USDC = 1 YES token (always)
+
+        usdc_balance = self.client.get_usdc_balance()
+        if usdc_balance < to_split_usdc:
+            logger.warning(
+                f"Insufficient USDC to split: need ${to_split_usdc:.2f}, "
+                f"have ${usdc_balance:.2f}. Skipping ASK orders."
+            )
+            return False
+
+        logger.info(
+            f"YES balance {current:.0f} < needed {needed_shares:.0f}. "
+            f"Splitting ${to_split_usdc:.2f} USDC..."
+        )
+        return self.client.split_position(condition_id, to_split_usdc)
+
+    def update_orders(
+        self,
+        token_id: str,
+        quotes: QuotePair,
+        condition_id: str | None = None,
+        midpoint: float = 0.5,
+    ):
         """Cancel existing orders and place new ones (cancel-replace cycle).
 
-        This is the safest approach: cancel all, then place new.
-        Avoids stale orders and simplifies state management.
+        Before placing ASK orders, checks YES token balance and splits
+        USDC if needed so both sides can be fully funded.
         """
         # Step 1: Cancel existing orders for this token
         self._cancel_token_orders(token_id)
 
-        # Step 2: Place new orders
+        # Step 2: Ensure YES token inventory for ASK orders
+        if quotes.asks and condition_id:
+            total_ask_shares = sum(q.size for q in quotes.asks)
+            self.ensure_ask_inventory(
+                token_id=token_id,
+                condition_id=condition_id,
+                needed_shares=total_ask_shares,
+                midpoint=midpoint,
+            )
+
+        # Step 3: Place new orders
         new_orders = []
 
         for quote in quotes.bids:
