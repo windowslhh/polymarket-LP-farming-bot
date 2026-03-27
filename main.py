@@ -91,11 +91,16 @@ def main():
         sys.exit(1)
 
     # Initialize client
+    funder = os.getenv("FUNDER_ADDRESS")
+    signature_type = poly_cfg.get("signature_type", 0)
+    if funder:
+        logger.info(f"Using funder (proxy wallet): {funder}")
     client = PolymarketClient(
         host=poly_cfg.get("host", "https://clob.polymarket.com"),
         private_key=private_key,
         chain_id=poly_cfg.get("chain_id", 137),
-        signature_type=poly_cfg.get("signature_type", 0),
+        signature_type=signature_type,
+        funder=funder,
     )
 
     # Authenticate
