@@ -132,10 +132,13 @@ class LPFarmingBot:
         """
         logger.info("Refreshing market selection...")
         try:
-            raw_markets = self.client.get_simplified_markets()
+            # Use sampling markets (reward-eligible only, has full field data)
+            raw_markets = self.client.get_sampling_markets()
             if not raw_markets:
                 logger.warning("No markets returned from API")
                 return
+
+            logger.info(f"Fetched {len(raw_markets)} sampling markets")
 
             # Merge risk config into market selection config
             selection_config = {
@@ -145,11 +148,14 @@ class LPFarmingBot:
                 "min_days_to_expiry": self.risk_manager.min_days_to_expiry,
             }
 
-            # Collect orderbook data for competition assessment
-            # Only fetch for candidate markets (those with tokens)
+            # Pass 1: Quick score all markets (no API calls) to find candidates
+            from src.market_selector import _quick_score_markets
+            candidates = _quick_score_markets(raw_markets, selection_config, top_n=30)
+
+            # Pass 2: Fetch orderbooks only for top candidates
             orderbooks = {}
             price_histories = {}
-            for market in raw_markets[:50]:  # Limit API calls
+            for market in candidates:
                 tokens = market.get("tokens", [])
                 if tokens:
                     tid = tokens[0].get("token_id", "")
@@ -161,11 +167,12 @@ class LPFarmingBot:
                                 "asks": [{"price": a.price, "size": a.size} for a in ob.asks],
                             }
                         except Exception:
-                            pass  # Skip if orderbook fetch fails
+                            pass  # Skip markets without orderbooks
                         # Use cached midpoint history for volatility
                         if tid in self._price_history:
                             price_histories[tid] = self._price_history[tid]
 
+            # Pass 3: Re-score with competition data
             new_markets = select_markets(
                 raw_markets,
                 max_markets=self.market_cfg.get("max_markets", 5),

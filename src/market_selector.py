@@ -563,3 +563,67 @@ def _get_daily_volume(market: dict) -> float:
             except (ValueError, TypeError):
                 pass
     return 0.0
+
+
+def _quick_score_markets(
+    markets: list[dict],
+    config: dict | None = None,
+    top_n: int = 30,
+) -> list[dict]:
+    """Quick first-pass scoring without API calls.
+
+    Scores all markets using only metadata (no orderbook/price history).
+    Returns top_n raw market dicts for further orderbook fetching.
+    Used in bot.py to identify candidates before fetching orderbooks.
+    """
+    if config is None:
+        config = {}
+
+    min_prob = config.get("min_probability", 0.15)
+    max_prob = config.get("max_probability", 0.85)
+    min_expiry = config.get("min_days_to_expiry", 7)
+    min_vol = config.get("min_daily_volume", 200)
+    require_rewards = config.get("require_rewards", True)
+    min_reward_pool = config.get("min_reward_pool", 1.0)
+
+    candidates = []
+    for market in markets:
+        tokens = market.get("tokens", [])
+        if not tokens or not tokens[0].get("token_id"):
+            continue
+
+        if _is_blacklisted(market):
+            continue
+
+        reward_info = parse_reward_info(market)
+        if require_rewards and not reward_info.has_rewards:
+            continue
+        if reward_info.has_rewards and reward_info.total_rewards < min_reward_pool:
+            continue
+
+        midpoint = _get_midpoint(market)
+        if midpoint < min_prob or midpoint > max_prob:
+            continue
+
+        days_to_expiry = _get_days_to_expiry(market)
+        if days_to_expiry < min_expiry:
+            continue
+
+        daily_volume = _get_daily_volume(market)
+        if daily_volume > 0 and daily_volume < min_vol:
+            continue
+
+        if not market.get("active", True):
+            continue
+
+        # Quick score: reward × category × expiry (no volatility/competition yet)
+        category = _get_category(market)
+        reward_score = math.log2(max(reward_info.total_rewards, 1)) + 1 if reward_info.has_rewards else 0.5
+        cat_score = CATEGORY_PRIORITY.get(category, 0.5)
+        expiry_score = 1.0 if 14 < days_to_expiry <= 90 else (0.85 if days_to_expiry > 90 else 0.5)
+        quick_score = reward_score * cat_score * expiry_score
+
+        candidates.append((quick_score, market))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [m for _, m in candidates[:top_n]]
