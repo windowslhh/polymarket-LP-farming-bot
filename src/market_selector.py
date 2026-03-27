@@ -275,6 +275,8 @@ def score_market(
     max_volatility: float = 8.0,
     max_order_size_usdc: float = 0.0,  # 0 = no cap
     spread_bps: int = 200,
+    order_levels: int = 2,
+    level_spacing_bps: int = 100,
     orderbook: dict | None = None,
     price_history: list[float] | None = None,
 ) -> tuple[float, RewardInfo, CompetitionInfo, float]:
@@ -331,7 +333,7 @@ def score_market(
     # 7. Capital feasibility: min_shares × worst_ask_price must fit within order size cap
     #    worst_ask ≈ midpoint + spread/2 (the most expensive price we'll post)
     if max_order_size_usdc > 0 and reward_info.has_rewards and reward_info.min_shares > 0:
-        worst_ask = midpoint + (spread_bps / 20000)
+        worst_ask = midpoint + (spread_bps / 20000) + (order_levels - 1) * level_spacing_bps / 10000
         required_usdc = reward_info.min_shares * worst_ask
         if required_usdc > max_order_size_usdc:
             return empty  # Can't meet min_shares within capital cap
@@ -452,6 +454,8 @@ def select_markets(
     max_volatility = config.get("max_volatility_cents", 8.0)
     max_order_size = config.get("max_order_size_usdc", 0.0)
     spread_bps = config.get("spread_bps", 200)
+    order_levels = config.get("order_levels", 2)
+    level_spacing_bps = config.get("level_spacing_bps", 100)
 
     scored = []
     filtered_counts = {"blacklist": 0, "no_rewards": 0, "low_score": 0, "passed": 0}
@@ -477,6 +481,8 @@ def select_markets(
             max_volatility=max_volatility,
             max_order_size_usdc=max_order_size,
             spread_bps=spread_bps,
+            order_levels=order_levels,
+            level_spacing_bps=level_spacing_bps,
             orderbook=ob,
             price_history=ph,
         )
@@ -601,6 +607,8 @@ def _quick_score_markets(
     min_reward_pool = config.get("min_reward_pool", 1.0)
     max_order_size = config.get("max_order_size_usdc", 0.0)
     spread_bps = config.get("spread_bps", 200)
+    order_levels = config.get("order_levels", 2)
+    level_spacing_bps = config.get("level_spacing_bps", 100)
 
     candidates = []
     for market in markets:
@@ -634,7 +642,7 @@ def _quick_score_markets(
 
         # Capital feasibility check (same logic as score_market)
         if max_order_size > 0 and reward_info.has_rewards and reward_info.min_shares > 0:
-            worst_ask = midpoint + (spread_bps / 20000)
+            worst_ask = midpoint + (spread_bps / 20000) + (order_levels - 1) * level_spacing_bps / 10000
             if reward_info.min_shares * worst_ask > max_order_size:
                 continue
 

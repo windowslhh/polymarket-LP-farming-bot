@@ -39,6 +39,7 @@ class LPFarmingBot:
         self.order_size = strategy_cfg.get("order_size_usdc", 30)
         self.max_order_size = strategy_cfg.get("max_order_size_usdc", 80)
         self.order_levels = strategy_cfg.get("order_levels", 2)
+        self.level_spacing_bps = strategy_cfg.get("level_spacing_bps", 100)
         self.refresh_interval = strategy_cfg.get("refresh_interval_sec", 15)
         self.market_refresh_interval = strategy_cfg.get("market_refresh_interval_sec", 300)
 
@@ -234,9 +235,12 @@ class LPFarmingBot:
         effective_size = self.order_size
         effective_spread = self.spread_bps
         if market.reward_info.has_rewards and midpoint > 0:
-            # Use highest quote price (ask side) so even ask orders meet min_shares
-            # ask_price ≈ midpoint + spread/2
-            worst_price = midpoint + effective_spread / 20000
+            # Use the worst (highest) ask price across ALL levels so every level meets min_shares
+            # level 0 ask = mid + spread/2
+            # level N ask = mid + spread/2 + N × level_spacing
+            worst_price = (midpoint
+                           + effective_spread / 20000
+                           + (self.order_levels - 1) * self.level_spacing_bps / 10000)
             min_usdc = market.reward_info.min_shares * worst_price
             if min_usdc > effective_size:
                 if min_usdc > self.max_order_size:
