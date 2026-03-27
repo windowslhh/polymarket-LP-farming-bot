@@ -15,7 +15,11 @@ from py_clob_client.constants import POLYGON
 # Polygon mainnet contract addresses
 _CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 _USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-_POLYGON_RPC = "https://polygon-rpc.com"
+_POLYGON_RPCS = [
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://rpc.ankr.com/polygon",
+    "https://polygon-rpc.com",
+]
 _USDC_DECIMALS = 6  # USDC and CTF conditional tokens both use 6 decimals
 
 # Minimal ABI for CTF split/merge and ERC20 approve
@@ -315,10 +319,20 @@ class PolymarketClient:
             return 0.0
 
     def _get_w3(self):
-        """Lazy-init Web3 connection."""
+        """Lazy-init Web3 connection, trying multiple RPCs."""
         if self._w3 is None:
             from web3 import Web3
-            self._w3 = Web3(Web3.HTTPProvider(_POLYGON_RPC))
+            for rpc_url in _POLYGON_RPCS:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(rpc_url))
+                    if w3.is_connected():
+                        logger.debug(f"Connected to Polygon RPC: {rpc_url}")
+                        self._w3 = w3
+                        return self._w3
+                except Exception:
+                    continue
+            # Fallback to first RPC even if connection check failed
+            self._w3 = Web3(Web3.HTTPProvider(_POLYGON_RPCS[0]))
         return self._w3
 
     def _get_wallet_address(self) -> str:
