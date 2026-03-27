@@ -273,6 +273,8 @@ def score_market(
     min_reward_pool: float = 1.0,
     max_reward_pool: float = 100.0,
     max_volatility: float = 8.0,
+    max_order_size_usdc: float = 0.0,  # 0 = no cap
+    spread_bps: int = 200,
     orderbook: dict | None = None,
     price_history: list[float] | None = None,
 ) -> tuple[float, RewardInfo, CompetitionInfo, float]:
@@ -325,6 +327,14 @@ def score_market(
     # 6. Market must be active
     if not market.get("active", True):
         return empty
+
+    # 7. Capital feasibility: min_shares × worst_ask_price must fit within order size cap
+    #    worst_ask ≈ midpoint + spread/2 (the most expensive price we'll post)
+    if max_order_size_usdc > 0 and reward_info.has_rewards and reward_info.min_shares > 0:
+        worst_ask = midpoint + (spread_bps / 20000)
+        required_usdc = reward_info.min_shares * worst_ask
+        if required_usdc > max_order_size_usdc:
+            return empty  # Can't meet min_shares within capital cap
 
     # --- Volatility assessment ---
     volatility = estimate_volatility(price_history)
@@ -440,6 +450,8 @@ def select_markets(
     min_reward_pool = config.get("min_reward_pool", 1.0)
     max_reward_pool = config.get("max_reward_pool", 100.0)
     max_volatility = config.get("max_volatility_cents", 8.0)
+    max_order_size = config.get("max_order_size_usdc", 0.0)
+    spread_bps = config.get("spread_bps", 200)
 
     scored = []
     filtered_counts = {"blacklist": 0, "no_rewards": 0, "low_score": 0, "passed": 0}
@@ -463,6 +475,8 @@ def select_markets(
             min_reward_pool=min_reward_pool,
             max_reward_pool=max_reward_pool,
             max_volatility=max_volatility,
+            max_order_size_usdc=max_order_size,
+            spread_bps=spread_bps,
             orderbook=ob,
             price_history=ph,
         )
@@ -585,6 +599,8 @@ def _quick_score_markets(
     min_vol = config.get("min_daily_volume", 200)
     require_rewards = config.get("require_rewards", True)
     min_reward_pool = config.get("min_reward_pool", 1.0)
+    max_order_size = config.get("max_order_size_usdc", 0.0)
+    spread_bps = config.get("spread_bps", 200)
 
     candidates = []
     for market in markets:
@@ -615,6 +631,12 @@ def _quick_score_markets(
 
         if not market.get("active", True):
             continue
+
+        # Capital feasibility check (same logic as score_market)
+        if max_order_size > 0 and reward_info.has_rewards and reward_info.min_shares > 0:
+            worst_ask = midpoint + (spread_bps / 20000)
+            if reward_info.min_shares * worst_ask > max_order_size:
+                continue
 
         # Quick score: reward × category × expiry (no volatility/competition yet)
         category = _get_category(market)

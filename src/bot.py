@@ -141,12 +141,14 @@ class LPFarmingBot:
 
             logger.info(f"Fetched {len(raw_markets)} sampling markets")
 
-            # Merge risk config into market selection config
+            # Merge risk + strategy config into market selection config
             selection_config = {
                 **self.market_cfg,
                 "min_probability": self.risk_manager.min_probability,
                 "max_probability": self.risk_manager.max_probability,
                 "min_days_to_expiry": self.risk_manager.min_days_to_expiry,
+                "max_order_size_usdc": self.max_order_size,
+                "spread_bps": self.spread_bps,
             }
 
             # Pass 1: Quick score all markets (no API calls) to find candidates
