@@ -226,8 +226,10 @@ class LPFarmingBot:
         effective_size = self.order_size
         effective_spread = self.spread_bps
         if market.reward_info.has_rewards and midpoint > 0:
-            # min USDC needed = min_shares × price
-            min_usdc = market.reward_info.min_shares * midpoint
+            # Use highest quote price (ask side) so even ask orders meet min_shares
+            # ask_price ≈ midpoint + spread/2
+            worst_price = midpoint + effective_spread / 20000
+            min_usdc = market.reward_info.min_shares * worst_price
             if min_usdc > effective_size:
                 effective_size = min_usdc
                 logger.debug(
