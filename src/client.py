@@ -250,7 +250,7 @@ class PolymarketClient:
     # -- Token balances and on-chain operations --
 
     def get_usdc_balance(self) -> float:
-        """Get available USDC balance (in dollars)."""
+        """Get available USDC balance on Polymarket exchange (in dollars)."""
         try:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -260,6 +260,44 @@ class PolymarketClient:
         except Exception as e:
             logger.warning(f"Could not fetch USDC balance: {e}")
             return 0.0
+
+    def get_onchain_usdc_balance(self) -> float:
+        """Get on-chain USDC balance in the wallet (not Polymarket exchange)."""
+        try:
+            w3 = self._get_w3()
+            wallet = self._get_wallet_address()
+            usdc = w3.eth.contract(
+                address=w3.to_checksum_address(_USDC_ADDRESS),
+                abi=_ERC20_ABI + [
+                    {
+                        "name": "balanceOf",
+                        "type": "function",
+                        "stateMutability": "view",
+                        "inputs": [{"name": "account", "type": "address"}],
+                        "outputs": [{"type": "uint256"}],
+                    }
+                ],
+            )
+            raw = usdc.functions.balanceOf(wallet).call()
+            return raw / 10 ** _USDC_DECIMALS
+        except Exception as e:
+            logger.warning(f"Could not fetch on-chain USDC balance: {e}")
+            return 0.0
+
+    def get_matic_balance(self) -> float:
+        """Get native MATIC/POL balance for gas fees."""
+        try:
+            w3 = self._get_w3()
+            wallet = self._get_wallet_address()
+            raw = w3.eth.get_balance(wallet)
+            return raw / 10 ** 18
+        except Exception as e:
+            logger.warning(f"Could not fetch MATIC balance: {e}")
+            return 0.0
+
+    def get_wallet_address(self) -> str:
+        """Public method to get the wallet address."""
+        return self._get_wallet_address()
 
     def get_conditional_balance(self, token_id: str) -> float:
         """Get YES/NO conditional token balance (in shares)."""

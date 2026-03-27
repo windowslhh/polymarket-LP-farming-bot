@@ -106,6 +106,36 @@ def main():
         logger.error("Check your PRIVATE_KEY and signature_type in config")
         sys.exit(1)
 
+    # Wallet diagnostic
+    wallet_addr = client.get_wallet_address()
+    logger.info(f"Bot wallet address: {wallet_addr}")
+
+    onchain_usdc = client.get_onchain_usdc_balance()
+    exchange_usdc = client.get_usdc_balance()
+    matic = client.get_matic_balance()
+
+    logger.info(f"On-chain USDC balance: ${onchain_usdc:.2f}")
+    logger.info(f"Polymarket exchange USDC: ${exchange_usdc:.2f}")
+    logger.info(f"MATIC/POL (gas): {matic:.4f}")
+
+    if exchange_usdc < 1.0 and onchain_usdc > 1.0:
+        logger.warning(
+            "You have USDC in your wallet but NOT on Polymarket exchange! "
+            "Go to https://polymarket.com and deposit USDC first, "
+            "or the bot cannot place orders."
+        )
+        sys.exit(1)
+
+    if exchange_usdc < 1.0 and onchain_usdc < 1.0:
+        logger.error(
+            f"No USDC found! Wallet {wallet_addr} has $0. "
+            "Please transfer USDC (Polygon) to this address."
+        )
+        sys.exit(1)
+
+    if matic < 0.001:
+        logger.warning("Very low MATIC balance — may not have enough for gas fees")
+
     # Create and run bot
     bot = LPFarmingBot(client=client, config=config, dry_run=args.dry_run)
     bot.run()
