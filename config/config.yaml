@@ -9,12 +9,17 @@ polymarket:
 
 strategy:
   # Calibrated for $500 USDC total capital
-  spread_bps: 200               # 2% spread (backtest optimal)
-  order_size_usdc: 30           # $30 base per layer (3 markets × 2 sides × 2 levels × $30 = $360)
-  max_order_size_usdc: 80       # Cap auto-sizing (prevents high min_shares markets from eating capital)
+  # Airdrop farming philosophy: post near OUTER EDGE of reward zone, not tight to mid.
+  # Let competitive bots absorb adverse selection. We sit safely inside reward boundary.
+  spread_bps: 200               # Minimum spread floor (never go tighter than this)
+  spread_target_pct: 0.80       # Target 80% of each market's max_spread (outer edge strategy)
+                                 # e.g. max_spread=350bps → we post at 280bps (safe zone)
+  order_size_usdc: 30           # $30 base per layer
+  max_order_size_usdc: 80       # Cap auto-sizing for high min_shares markets
   order_levels: 2               # 2 layers per side
-  refresh_interval_sec: 15      # How often to refresh quotes
-  market_refresh_interval_sec: 300  # How often to re-select markets (5 min)
+  level_spacing_bps: 100        # Extra spread per level (100bps)
+  refresh_interval_sec: 5       # Requote every 5s (was 15s — faster response to price moves)
+  market_refresh_interval_sec: 300
 
 risk:
   # Capital: $500 → usable ~$450 (keep $50 buffer for gas + splits)

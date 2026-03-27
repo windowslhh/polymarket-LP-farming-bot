@@ -35,12 +35,13 @@ class LPFarmingBot:
         risk_cfg = config.get("risk", {})
         self.market_cfg = config.get("market_selection", {})
 
-        self.spread_bps = strategy_cfg.get("spread_bps", 300)
+        self.spread_bps = strategy_cfg.get("spread_bps", 200)         # minimum spread floor
+        self.spread_target_pct = strategy_cfg.get("spread_target_pct", 0.80)  # % of max_spread to target
         self.order_size = strategy_cfg.get("order_size_usdc", 30)
         self.max_order_size = strategy_cfg.get("max_order_size_usdc", 80)
         self.order_levels = strategy_cfg.get("order_levels", 2)
         self.level_spacing_bps = strategy_cfg.get("level_spacing_bps", 100)
-        self.refresh_interval = strategy_cfg.get("refresh_interval_sec", 15)
+        self.refresh_interval = strategy_cfg.get("refresh_interval_sec", 5)   # faster requote
         self.market_refresh_interval = strategy_cfg.get("market_refresh_interval_sec", 300)
 
         self.order_manager = OrderManager(client)
@@ -228,16 +229,26 @@ class LPFarmingBot:
 
         # Check if we need to requote
         last_mid = self.last_midpoints.get(token_id, 0)
-        if not should_requote(midpoint, last_mid, threshold_bps=50):
+        if not should_requote(midpoint, last_mid, threshold_bps=25):
             return  # Price hasn't moved enough, keep existing orders
 
-        # Determine effective order size and spread to meet reward requirements
+        # Determine effective spread and size
         effective_size = self.order_size
         effective_spread = self.spread_bps
+
         if market.reward_info.has_rewards and midpoint > 0:
-            # Use the worst (highest) ask price across ALL levels so every level meets min_shares
-            # level 0 ask = mid + spread/2
-            # level N ask = mid + spread/2 + N × level_spacing
+            max_spread_bps = int(market.reward_info.max_spread * 10000)
+
+            # Airdrop farming strategy: post near OUTER EDGE of reward zone (80% of max_spread)
+            # NOT tight to mid — let competitive bots absorb adverse selection there.
+            # We sit just inside the reward boundary, rarely getting hit, collecting rewards.
+            target_spread = int(max_spread_bps * self.spread_target_pct)
+            # Enforce a minimum spread for safety (don't go tighter than config)
+            effective_spread = max(self.spread_bps, target_spread)
+            # Never exceed max_spread (would lose reward eligibility)
+            effective_spread = min(effective_spread, max_spread_bps)
+
+            # Size: enough USDC so every level meets min_shares requirement
             worst_price = (midpoint
                            + effective_spread / 20000
                            + (self.order_levels - 1) * self.level_spacing_bps / 10000)
@@ -248,16 +259,8 @@ class LPFarmingBot:
                         f"Skipping {market.question[:30]}...: "
                         f"min_shares requires ${min_usdc:.0f} but cap is ${self.max_order_size:.0f}"
                     )
-                    return  # Market requires too much capital per order
+                    return
                 effective_size = min_usdc
-                logger.debug(
-                    f"Sizing up for {market.question[:30]}...: "
-                    f"${effective_size:.0f} (min {market.reward_info.min_shares:.0f} shares @ {midpoint:.2f})"
-                )
-            # Clamp spread to max_spread requirement (convert to bps)
-            max_spread_bps = int(market.reward_info.max_spread * 10000)
-            if effective_spread > max_spread_bps:
-                effective_spread = max_spread_bps
 
         # Calculate new quotes
         skew = self.risk_manager.get_inventory_skew(token_id)
