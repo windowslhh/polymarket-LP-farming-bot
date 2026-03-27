@@ -37,6 +37,7 @@ class LPFarmingBot:
 
         self.spread_bps = strategy_cfg.get("spread_bps", 300)
         self.order_size = strategy_cfg.get("order_size_usdc", 30)
+        self.max_order_size = strategy_cfg.get("max_order_size_usdc", 80)
         self.order_levels = strategy_cfg.get("order_levels", 2)
         self.refresh_interval = strategy_cfg.get("refresh_interval_sec", 15)
         self.market_refresh_interval = strategy_cfg.get("market_refresh_interval_sec", 300)
@@ -235,6 +236,12 @@ class LPFarmingBot:
             worst_price = midpoint + effective_spread / 20000
             min_usdc = market.reward_info.min_shares * worst_price
             if min_usdc > effective_size:
+                if min_usdc > self.max_order_size:
+                    logger.warning(
+                        f"Skipping {market.question[:30]}...: "
+                        f"min_shares requires ${min_usdc:.0f} but cap is ${self.max_order_size:.0f}"
+                    )
+                    return  # Market requires too much capital per order
                 effective_size = min_usdc
                 logger.debug(
                     f"Sizing up for {market.question[:30]}...: "
