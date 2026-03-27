@@ -288,6 +288,30 @@ class PolymarketClient:
             logger.warning(f"Could not fetch on-chain USDC balance: {e}")
             return 0.0
 
+    def get_onchain_native_usdc_balance(self) -> float:
+        """Get on-chain native USDC balance (different from USDC.e)."""
+        _NATIVE_USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+        try:
+            w3 = self._get_w3()
+            wallet = self._get_wallet_address()
+            usdc = w3.eth.contract(
+                address=w3.to_checksum_address(_NATIVE_USDC),
+                abi=_ERC20_ABI + [
+                    {
+                        "name": "balanceOf",
+                        "type": "function",
+                        "stateMutability": "view",
+                        "inputs": [{"name": "account", "type": "address"}],
+                        "outputs": [{"type": "uint256"}],
+                    }
+                ],
+            )
+            raw = usdc.functions.balanceOf(wallet).call()
+            return raw / 10 ** _USDC_DECIMALS
+        except Exception as e:
+            logger.warning(f"Could not fetch native USDC balance: {e}")
+            return 0.0
+
     def get_matic_balance(self) -> float:
         """Get native MATIC/POL balance for gas fees."""
         try:

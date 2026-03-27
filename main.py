@@ -111,22 +111,32 @@ def main():
     logger.info(f"Bot wallet address: {wallet_addr}")
 
     onchain_usdc = client.get_onchain_usdc_balance()
+    native_usdc = client.get_onchain_native_usdc_balance()
     exchange_usdc = client.get_usdc_balance()
     matic = client.get_matic_balance()
 
-    logger.info(f"On-chain USDC balance: ${onchain_usdc:.2f}")
+    logger.info(f"On-chain USDC.e balance (Polymarket uses this): ${onchain_usdc:.2f}")
+    logger.info(f"On-chain native USDC balance: ${native_usdc:.2f}")
     logger.info(f"Polymarket exchange USDC: ${exchange_usdc:.2f}")
     logger.info(f"MATIC/POL (gas): {matic:.4f}")
 
+    if native_usdc > 1.0 and onchain_usdc < 1.0 and exchange_usdc < 1.0:
+        logger.error(
+            f"You have ${native_usdc:.2f} native USDC, but Polymarket uses USDC.e! "
+            "You need to swap native USDC → USDC.e on a DEX (e.g. QuickSwap), "
+            "or deposit native USDC through the Polymarket website which handles conversion."
+        )
+        sys.exit(1)
+
     if exchange_usdc < 1.0 and onchain_usdc > 1.0:
         logger.warning(
-            "You have USDC in your wallet but NOT on Polymarket exchange! "
+            "You have USDC.e in your wallet but NOT on Polymarket exchange! "
             "Go to https://polymarket.com and deposit USDC first, "
             "or the bot cannot place orders."
         )
         sys.exit(1)
 
-    if exchange_usdc < 1.0 and onchain_usdc < 1.0:
+    if exchange_usdc < 1.0 and onchain_usdc < 1.0 and native_usdc < 1.0:
         logger.error(
             f"No USDC found! Wallet {wallet_addr} has $0. "
             "Please transfer USDC (Polygon) to this address."
