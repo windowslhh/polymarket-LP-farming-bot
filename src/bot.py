@@ -222,36 +222,32 @@ class LPFarmingBot:
         if not should_requote(midpoint, last_mid, threshold_bps=50):
             return  # Price hasn't moved enough, keep existing orders
 
+        # Determine effective order size and spread to meet reward requirements
+        effective_size = self.order_size
+        effective_spread = self.spread_bps
+        if market.reward_info.has_rewards and midpoint > 0:
+            # min USDC needed = min_shares × price
+            min_usdc = market.reward_info.min_shares * midpoint
+            if min_usdc > effective_size:
+                effective_size = min_usdc
+                logger.debug(
+                    f"Sizing up for {market.question[:30]}...: "
+                    f"${effective_size:.0f} (min {market.reward_info.min_shares:.0f} shares @ {midpoint:.2f})"
+                )
+            # Clamp spread to max_spread requirement (convert to bps)
+            max_spread_bps = int(market.reward_info.max_spread * 10000)
+            if effective_spread > max_spread_bps:
+                effective_spread = max_spread_bps
+
         # Calculate new quotes
         skew = self.risk_manager.get_inventory_skew(token_id)
         quotes = calculate_quotes(
             midpoint=midpoint,
-            spread_bps=self.spread_bps,
-            order_size=self.order_size,
+            spread_bps=effective_spread,
+            order_size=effective_size,
             order_levels=self.order_levels,
             inventory_skew=skew,
         )
-
-        # Check reward compliance before placing orders
-        if market.reward_info.has_rewards:
-            compliant, reason = check_reward_compliance(
-                quotes,
-                max_spread=market.reward_info.max_spread,
-                min_shares=market.reward_info.min_shares,
-            )
-            if not compliant:
-                logger.warning(
-                    f"Quotes not reward-compliant for {market.question[:30]}...: {reason}. "
-                    f"Adjusting..."
-                )
-                # Try tighter spread to comply
-                quotes = calculate_quotes(
-                    midpoint=midpoint,
-                    spread_bps=min(self.spread_bps, int(market.reward_info.max_spread * 10000)),
-                    order_size=max(self.order_size, market.reward_info.min_shares * midpoint),
-                    order_levels=1,  # Single level for tighter compliance
-                    inventory_skew=skew,
-                )
 
         if self.dry_run:
             # Log what we would do
