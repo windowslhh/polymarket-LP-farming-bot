@@ -34,10 +34,10 @@ class VolumeBacktestConfig:
     max_position_pct: float = 0.02
     edge_assumption: float = 0.02   # Assumed edge over market price
     # Stop-loss
-    ev_stop_enabled: bool = False   # EV stop is too sensitive for high-prob hold strategy
+    ev_stop_enabled: bool = True    # EV stop saves ~$4 vs hard-stop-only (backtest tuned)
     ev_buffer: float = 0.05
     ev_persistence_minutes: float = 60.0
-    hard_stop_probability: float = 0.75
+    hard_stop_probability: float = 0.70
     drift_sigma_threshold: float = 2.0
     pl_ratio_min: float = 0.20
     near_expiry_exit: bool = False  # Near-expiry exit (usually too aggressive)

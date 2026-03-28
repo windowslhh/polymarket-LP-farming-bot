@@ -97,16 +97,18 @@ volume_farming:
 
   # --- Stop-loss (three-layer defense) ---
   # Layer 1: EV stop (probability drops below breakeven - buffer)
-  ev_buffer: 0.02                   # 2% buffer below breakeven before triggering
-  ev_persistence_minutes: 5.0       # Must stay below threshold for 5 min
-  # Layer 2: Drawdown stop (dynamic by entry probability)
+  ev_stop_enabled: true             # EV stop saves ~$4 vs hard-stop-only (backtest tuned)
+  ev_buffer: 0.05                   # 5% buffer below breakeven before triggering
+  ev_persistence_minutes: 60.0      # Must stay below threshold for 60 min to confirm
+  near_expiry_exit: false           # Near-expiry exit too aggressive, disabled
+  # Layer 2: Drawdown stop (dynamic by entry probability, widened per backtest)
   drawdown_by_entry_prob:
-    "0.97": 0.03                    # 97% entry -> tolerate 3% drawdown
-    "0.95": 0.05                    # 95% entry -> tolerate 5% drawdown
-    "0.92": 0.08                    # 92% entry -> tolerate 8% drawdown
-    "0.90": 0.10                    # 90% entry -> tolerate 10% drawdown
-  # Layer 3: Hard stop (absolute floor)
-  hard_stop_probability: 0.75       # Below 75% -> unconditional exit
+    "0.97": 0.05                    # 97% entry -> tolerate 5% drawdown
+    "0.95": 0.08                    # 95% entry -> tolerate 8% drawdown
+    "0.92": 0.12                    # 92% entry -> tolerate 12% drawdown
+    "0.90": 0.15                    # 90% entry -> tolerate 15% drawdown
+  # Layer 3: Hard stop (absolute floor, relaxed from 0.75 per backtest)
+  hard_stop_probability: 0.70       # Below 70% -> unconditional exit
 
   # --- Drift velocity monitoring ---
   drift_sigma_threshold: 2.0        # Drift > 2σ/day -> emergency exit

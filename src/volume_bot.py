@@ -56,10 +56,12 @@ class VolumeFarmingBot:
 
         # Stop-loss config (passed to assess_position_risk)
         self.sl_config = {
-            "hard_stop_probability": vf_cfg.get("hard_stop_probability", 0.75),
+            "hard_stop_probability": vf_cfg.get("hard_stop_probability", 0.70),
             "drift_sigma_threshold": vf_cfg.get("drift_sigma_threshold", 2.0),
-            "ev_buffer": vf_cfg.get("ev_buffer", 0.02),
-            "ev_persistence_minutes": vf_cfg.get("ev_persistence_minutes", 5.0),
+            "ev_buffer": vf_cfg.get("ev_buffer", 0.05),
+            "ev_persistence_minutes": vf_cfg.get("ev_persistence_minutes", 60.0),
+            "ev_stop_enabled": vf_cfg.get("ev_stop_enabled", True),
+            "near_expiry_exit": vf_cfg.get("near_expiry_exit", False),
             "pl_ratio_min": vf_cfg.get("pl_ratio_min", 0.20),
             "expiry_alert_days": vf_cfg.get("expiry_alert_days", 7),
             "drawdown_by_entry_prob": vf_cfg.get("drawdown_by_entry_prob", None),

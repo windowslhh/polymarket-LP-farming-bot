@@ -326,10 +326,12 @@ def assess_position_risk(
 
     Returns (action, reason, updated_below_ev_since).
     """
-    hard_stop = config.get("hard_stop_probability", 0.75)
+    hard_stop = config.get("hard_stop_probability", 0.70)
     sigma_threshold = config.get("drift_sigma_threshold", 2.0)
-    ev_buffer = config.get("ev_buffer", 0.02)
-    persistence_min = config.get("ev_persistence_minutes", 5.0)
+    ev_buffer = config.get("ev_buffer", 0.05)
+    persistence_min = config.get("ev_persistence_minutes", 60.0)
+    ev_stop_enabled = config.get("ev_stop_enabled", True)
+    near_expiry_exit = config.get("near_expiry_exit", False)
     pl_ratio_min = config.get("pl_ratio_min", 0.20)
     expiry_alert_days = config.get("expiry_alert_days", 7)
     drawdown_by_prob = config.get("drawdown_by_entry_prob", None)
@@ -348,13 +350,15 @@ def assess_position_risk(
             below_ev_since,
         )
 
-    # Priority 3: EV stop (with persistence)
-    ev_exit, ev_reason, updated_since = check_ev_stop_loss(
-        current_prob, entry_price, fee_rate, below_ev_since,
-        ev_buffer, persistence_min,
-    )
-    if ev_exit:
-        return StopLossAction.EXIT, ev_reason, updated_since
+    # Priority 3: EV stop (with persistence) — can be disabled
+    updated_since = below_ev_since
+    if ev_stop_enabled:
+        ev_exit, ev_reason, updated_since = check_ev_stop_loss(
+            current_prob, entry_price, fee_rate, below_ev_since,
+            ev_buffer, persistence_min,
+        )
+        if ev_exit:
+            return StopLossAction.EXIT, ev_reason, updated_since
 
     # Priority 4: Drawdown stop
     levels = compute_stop_loss_levels(entry_price, fee_rate, drawdown_by_prob, hard_stop)
@@ -371,15 +375,15 @@ def assess_position_risk(
 
     # Priority 5: P/L ratio degradation → reduce
     pl_ratio = compute_pl_ratio(current_prob, entry_price)
-    if pl_ratio < pl_ratio_min:
+    if 0 < pl_ratio < pl_ratio_min:
         return (
             StopLossAction.REDUCE,
             f"P/L ratio {pl_ratio:.2f} < {pl_ratio_min} → reduce position",
             updated_since,
         )
 
-    # Priority 6: Near-expiry risk
-    if days_to_expiry < expiry_alert_days:
+    # Priority 6: Near-expiry risk — can be disabled
+    if near_expiry_exit and days_to_expiry < expiry_alert_days:
         # In alert zone: any adverse movement is a signal
         if current_prob < entry_price - 0.01:
             return (
