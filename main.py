@@ -1,14 +1,17 @@
 """Entry point for Polymarket LP Farming Bot.
 
 Usage:
-    python main.py              # Run in live mode
-    python main.py --dry-run    # Dry run (no real orders)
-    python main.py --report     # Show PnL report
+    python main.py                      # Run LP farming (default)
+    python main.py --dry-run            # Dry run (no real orders)
+    python main.py --volume-farm        # Run volume farming only
+    python main.py --volume-farm --dry-run  # Volume farming dry run
+    python main.py --report             # Show PnL report
 """
 
 import argparse
 import os
 import sys
+import threading
 
 import yaml
 from dotenv import load_dotenv
@@ -64,6 +67,8 @@ def main():
                         help="Show PnL report and exit")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--volume-farm", action="store_true",
+                        help="Run volume farming strategy (buy high-prob outcomes)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -159,7 +164,40 @@ def main():
     if matic < 0.001:
         logger.warning("Very low MATIC/POL balance — gas fees may fail")
 
-    # Create and run bot
+    # Determine capital allocation
+    vf_cfg = config.get("volume_farming", {})
+    cap_cfg = config.get("capital_allocation", {})
+    volume_farm_enabled = args.volume_farm or vf_cfg.get("enabled", False)
+
+    if volume_farm_enabled:
+        from src.volume_bot import VolumeFarmingBot
+
+        vf_capital_pct = cap_cfg.get("volume_farming_pct", 0.10)
+        vf_capital = exchange_usdc * vf_capital_pct
+
+        if args.volume_farm and not vf_cfg.get("enabled", False):
+            # --volume-farm flag: run volume farming only
+            logger.info(f"Volume farming mode: capital ${vf_capital:.0f}")
+            vf_bot = VolumeFarmingBot(
+                client=client, config=config,
+                dry_run=args.dry_run, capital=vf_capital,
+            )
+            vf_bot.run()
+            return
+
+        # Both enabled: LP in main thread, volume farming in background
+        logger.info(
+            f"Parallel mode: LP ${exchange_usdc * cap_cfg.get('lp_farming_pct', 0.80):.0f} "
+            f"+ Volume ${vf_capital:.0f}"
+        )
+        vf_bot = VolumeFarmingBot(
+            client=client, config=config,
+            dry_run=args.dry_run, capital=vf_capital,
+        )
+        vf_thread = threading.Thread(target=vf_bot.run, daemon=True, name="volume-farm")
+        vf_thread.start()
+
+    # Create and run LP bot (default, or parallel with volume farming)
     bot = LPFarmingBot(client=client, config=config, dry_run=args.dry_run)
     bot.run()
 

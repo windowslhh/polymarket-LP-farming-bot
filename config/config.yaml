@@ -70,3 +70,66 @@ market_selection:
     - "above or below"
     - "5-minute"
     - "15-minute"
+
+# ═══════════════════════════════════════════════════════════
+# Volume Farming Strategy
+# Goal: Buy high-probability outcomes to generate trading volume for airdrop
+# Directional bets with dynamic stop-loss, NOT market-making
+# ═══════════════════════════════════════════════════════════
+volume_farming:
+  enabled: false                    # Set true or use --volume-farm to enable
+
+  # --- Market selection ---
+  min_probability: 0.90             # Only buy >=90% probability outcomes
+  max_probability: 0.99             # Skip 99%+ (too thin profit margin)
+  min_daily_volume: 1000            # Need liquidity for stop-loss exits
+  max_markets: 5                    # Max concurrent positions
+  min_days_to_expiry: 3             # At least 3 days (time to react)
+  max_days_to_expiry: 30            # Max 30 days (control capital lockup)
+  min_bid_depth_usdc: 200           # Min bid-side depth for exits
+  max_spread_pct: 0.03              # Max 3% bid-ask spread
+  min_annualized_return: 0.15       # Min 15% annualized return after fees
+
+  # --- Position sizing (Kelly criterion) ---
+  kelly_fraction: 0.25              # 1/4 Kelly (conservative)
+  max_position_pct: 0.02            # Single position cap: 2% of capital
+  max_total_exposure_pct: 0.10      # Total volume farming exposure: 10% of capital
+
+  # --- Stop-loss (three-layer defense) ---
+  # Layer 1: EV stop (probability drops below breakeven - buffer)
+  ev_buffer: 0.02                   # 2% buffer below breakeven before triggering
+  ev_persistence_minutes: 5.0       # Must stay below threshold for 5 min
+  # Layer 2: Drawdown stop (dynamic by entry probability)
+  drawdown_by_entry_prob:
+    "0.97": 0.03                    # 97% entry -> tolerate 3% drawdown
+    "0.95": 0.05                    # 95% entry -> tolerate 5% drawdown
+    "0.92": 0.08                    # 92% entry -> tolerate 8% drawdown
+    "0.90": 0.10                    # 90% entry -> tolerate 10% drawdown
+  # Layer 3: Hard stop (absolute floor)
+  hard_stop_probability: 0.75       # Below 75% -> unconditional exit
+
+  # --- Drift velocity monitoring ---
+  drift_sigma_threshold: 2.0        # Drift > 2σ/day -> emergency exit
+  drift_history_minutes: 60         # Use last 60 min for drift calculation
+
+  # --- P/L ratio ---
+  pl_ratio_min: 0.20                # P/L ratio < 1:5 -> reduce position by half
+
+  # --- Near-expiry risk ---
+  expiry_alert_days: 7              # Extra caution within 7 days of expiry
+
+  # --- Portfolio risk (VaR) ---
+  max_daily_drawdown_pct: 0.05      # Max 5% daily portfolio drawdown
+
+  # --- Execution ---
+  check_interval_sec: 30            # Check positions every 30s
+  market_refresh_interval_sec: 600  # Scan for new markets every 10 min
+  exit_timeout_sec: 60              # Limit order timeout before crossing spread
+
+# ═══════════════════════════════════════════════════════════
+# Capital allocation (when running both LP + volume farming)
+# ═══════════════════════════════════════════════════════════
+capital_allocation:
+  lp_farming_pct: 0.80              # 80% for LP market-making ($400/$500)
+  volume_farming_pct: 0.10          # 10% for volume farming ($50/$500)
+  reserve_pct: 0.10                 # 10% buffer ($50/$500)
