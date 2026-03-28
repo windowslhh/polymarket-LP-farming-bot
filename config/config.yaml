@@ -94,6 +94,8 @@ volume_farming:
   kelly_fraction: 0.25              # 1/4 Kelly (conservative)
   max_position_pct: 0.02            # Single position cap: 2% of capital
   max_total_exposure_pct: 0.10      # Total volume farming exposure: 10% of capital
+  edge_assumption: 0.02             # Assumed edge over market price for Kelly calc
+                                    # Set to 0 for pure volume farming (uses max_position_pct)
 
   # --- Stop-loss (three-layer defense) ---
   # Layer 1: EV stop (probability drops below breakeven - buffer)

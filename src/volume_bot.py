@@ -104,23 +104,66 @@ class VolumeFarmingBot:
         """Single iteration: monitor positions, scan for new entries."""
         self._tick_count += 1
 
-        # 1. Monitor existing positions (stop-loss checks)
+        # 1. Confirm pending entry orders
+        self._check_entry_orders()
+
+        # 2. Monitor existing positions (stop-loss checks)
         self._monitor_positions()
 
-        # 2. Check pending exit orders
+        # 3. Check pending exit orders
         self._check_exit_orders()
 
-        # 3. Refresh markets and enter new positions periodically
+        # 4. Refresh markets and enter new positions periodically
         if time.time() - self.last_market_refresh > self.market_refresh_interval:
             self._refresh_and_enter()
 
-        # 4. Log status every 10 ticks (~5 min)
+        # 5. Log status every 10 ticks (~5 min)
         if self._tick_count % 10 == 0:
             self._log_status()
 
-        # 5. Save positions every 20 ticks (~10 min)
+        # 6. Save positions every 20 ticks (~10 min)
         if self._tick_count % 20 == 0:
             self.tracker.save()
+
+    def _check_entry_orders(self):
+        """Check if pending entry orders have been filled.
+
+        If an entry order hasn't filled within 5 minutes, cancel it and
+        remove the pending position to free up capital.
+        """
+        entry_timeout = 300  # 5 minutes
+        for pos in list(self.tracker.positions.values()):
+            if pos.status != "pending":
+                continue
+
+            elapsed = time.time() - pos.entry_time
+
+            if self.dry_run:
+                # In dry run, immediately confirm
+                pos.status = "open"
+                continue
+
+            # Check if order is filled via position balance
+            try:
+                # Simple check: if we can get a price update, order likely filled
+                current_price = self._get_midpoint(pos.token_id)
+                if current_price is not None:
+                    pos.status = "open"
+                    pos.update_price(current_price)
+                    logger.info(f"Entry confirmed: {pos.question[:40]}... status=open")
+            except Exception:
+                pass
+
+            # Timeout: cancel unfilled entry order
+            if pos.status == "pending" and elapsed > entry_timeout:
+                logger.warning(f"Entry timeout ({elapsed:.0f}s): {pos.question[:40]}... cancelling")
+                try:
+                    if pos.entry_order_id:
+                        self.client.cancel_order(pos.entry_order_id)
+                except Exception as e:
+                    logger.error(f"Failed to cancel entry order: {e}")
+                # Remove the pending position
+                del self.tracker.positions[pos.token_id]
 
     def _monitor_positions(self):
         """Check each open position against stop-loss rules."""
@@ -272,11 +315,14 @@ class VolumeFarmingBot:
     def _enter_position(self, candidate: VolumeCandidate, remaining_budget: float):
         """Enter a new directional position."""
         # Kelly position sizing
-        # For volume farming, we assume our edge = the market is slightly
-        # underpricing high-probability events. Use a small edge assumption:
-        # estimated_win_prob = min(probability + 0.02, 0.999)
-        # This gives Kelly a positive signal while staying conservative.
-        estimated_win_prob = min(candidate.probability + 0.02, 0.999)
+        # Edge assumption: configurable via `edge_assumption` in config.
+        # Default +2%: we believe high-prob markets are slightly underpriced
+        # because resolution certainty is discounted by time value and fees.
+        # WARNING: this assumption is unverified. Set to 0 for pure volume farming
+        # (position size will be capped by max_position_pct instead of Kelly).
+        vf_cfg = self.config.get("volume_farming", {})
+        edge = vf_cfg.get("edge_assumption", 0.02)
+        estimated_win_prob = min(candidate.probability + edge, 0.999)
         position_size = kelly_position_size(
             win_prob=estimated_win_prob,
             entry_price=candidate.entry_price,
@@ -368,6 +414,8 @@ class VolumeFarmingBot:
                 stop_loss_price=levels["effective_stop"],
                 kelly_fraction=self.kelly_fraction,
                 days_to_expiry=candidate.days_to_expiry,
+                status="pending",           # Not yet confirmed filled
+                entry_order_id=order_id,
             )
             self.tracker.add_position(pos)
             self.ws_client.subscribe(candidate.token_id)

@@ -29,7 +29,9 @@ class VolumePosition:
     price_history: list[tuple[float, float]] = field(default_factory=list)
     stop_loss_price: float = 0.75
     kelly_fraction: float = 0.0
-    status: str = "open"        # "open" / "exiting" / "closed" / "resolved"
+    # State machine: pending -> open -> exiting -> closed/resolved
+    status: str = "open"
+    entry_order_id: str | None = None   # Track entry order for fill confirmation
     exit_order_id: str | None = None
     exit_order_time: float = 0.0
     exit_price: float = 0.0
@@ -38,30 +40,49 @@ class VolumePosition:
     days_to_expiry: float = 0.0
     # EV stop-loss persistence timer
     below_ev_since: float | None = None
+    # Price staleness tracking
+    last_price_update: float = 0.0
 
     def update_price(self, price: float):
         """Update current price and add to history."""
         now = time.time()
         self.current_price = price
+        self.last_price_update = now
         self.price_history.append((now, price))
-        # Keep last 120 entries (~60 min at 30s intervals)
-        if len(self.price_history) > 120:
-            self.price_history = self.price_history[-120:]
+        # Keep last 480 entries (~4 hours at 30s intervals)
+        # Longer history = better drift velocity estimation for multi-day holds
+        if len(self.price_history) > 480:
+            self.price_history = self.price_history[-480:]
 
-    def unrealized_pnl(self) -> float:
-        """Estimate unrealized P&L if we sold at current price."""
+    def is_price_stale(self, max_stale_sec: float = 300) -> bool:
+        """Check if price data is stale (no update for max_stale_sec)."""
+        if not self.last_price_update:
+            return False
+        return (time.time() - self.last_price_update) > max_stale_sec
+
+    def unrealized_pnl(self, fee_rate: float = 0.02) -> float:
+        """Estimate unrealized P&L if we sold at current price (fee-adjusted)."""
         if self.status != "open":
             return 0.0
-        # If YES resolves to 1.0: profit = (1.0 - entry_price) * shares
-        # Current mark-to-market: (current_price - entry_price) * shares
-        return (self.current_price - self.entry_price) * self.size_shares
+        # Mark-to-market: what we'd get selling now minus what we paid
+        entry_cost = self.entry_price * (1 + fee_rate) * self.size_shares
+        exit_proceeds = self.current_price * (1 - fee_rate) * self.size_shares
+        return exit_proceeds - entry_cost
 
-    def close(self, exit_price: float, reason: str):
-        """Mark position as closed."""
+    def close(self, exit_price: float, reason: str, fee_rate: float = 0.02):
+        """Mark position as closed with fee-adjusted PnL."""
         self.status = "closed"
         self.exit_price = exit_price
         self.exit_reason = reason
-        self.realized_pnl = (exit_price - self.entry_price) * self.size_shares
+        entry_cost = self.entry_price * (1 + fee_rate) * self.size_shares
+        if reason.startswith("resolved"):
+            # Resolution: no exit fee, payout is 1.0 (YES) or 0.0 (NO)
+            payout = exit_price * self.size_shares  # exit_price=1.0 or 0.0
+            self.realized_pnl = payout - entry_cost
+        else:
+            # Stop-loss exit: pay exit fee
+            exit_proceeds = exit_price * (1 - fee_rate) * self.size_shares
+            self.realized_pnl = exit_proceeds - entry_cost
         logger.info(
             f"Position closed: {self.question[:40]}... "
             f"entry={self.entry_price:.4f} exit={exit_price:.4f} "
@@ -88,8 +109,12 @@ class VolumePositionTracker:
         )
 
     def get_open_positions(self) -> list[VolumePosition]:
-        """Return all open positions."""
+        """Return all confirmed open positions (excludes pending/closed)."""
         return [p for p in self.positions.values() if p.status == "open"]
+
+    def get_pending_positions(self) -> list[VolumePosition]:
+        """Return positions awaiting entry fill confirmation."""
+        return [p for p in self.positions.values() if p.status == "pending"]
 
     def get_position(self, token_id: str) -> VolumePosition | None:
         return self.positions.get(token_id)
