@@ -170,10 +170,14 @@ def main():
     volume_farm_enabled = args.volume_farm or vf_cfg.get("enabled", False)
 
     if volume_farm_enabled:
+        from src.shared_risk import SharedRiskCoordinator
         from src.volume_bot import VolumeFarmingBot
 
         vf_capital_pct = cap_cfg.get("volume_farming_pct", 0.10)
         vf_capital = exchange_usdc * vf_capital_pct
+
+        # Shared risk coordinator for cross-bot risk management
+        risk_coordinator = SharedRiskCoordinator(config, total_capital=exchange_usdc)
 
         if args.volume_farm and not vf_cfg.get("enabled", False):
             # --volume-farm flag: run volume farming only
@@ -181,6 +185,7 @@ def main():
             vf_bot = VolumeFarmingBot(
                 client=client, config=config,
                 dry_run=args.dry_run, capital=vf_capital,
+                risk_coordinator=risk_coordinator,
             )
             vf_bot.run()
             return
@@ -188,11 +193,13 @@ def main():
         # Both enabled: LP in main thread, volume farming in background
         logger.info(
             f"Parallel mode: LP ${exchange_usdc * cap_cfg.get('lp_farming_pct', 0.80):.0f} "
-            f"+ Volume ${vf_capital:.0f}"
+            f"+ Volume ${vf_capital:.0f} | "
+            f"Global daily loss limit: ${risk_coordinator.global_daily_loss_limit}"
         )
         vf_bot = VolumeFarmingBot(
             client=client, config=config,
             dry_run=args.dry_run, capital=vf_capital,
+            risk_coordinator=risk_coordinator,
         )
         vf_thread = threading.Thread(target=vf_bot.run, daemon=True, name="volume-farm")
         vf_thread.start()

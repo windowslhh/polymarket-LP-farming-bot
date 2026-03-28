@@ -16,6 +16,7 @@ from loguru import logger
 
 from src.client import PolymarketClient
 from src.pnl_tracker import PnLTracker
+from src.shared_risk import SharedRiskCoordinator
 from src.stop_loss import (
     StopLossAction,
     assess_position_risk,
@@ -38,11 +39,13 @@ class VolumeFarmingBot:
         config: dict,
         dry_run: bool = False,
         capital: float = 50.0,
+        risk_coordinator: SharedRiskCoordinator | None = None,
     ):
         self.client = client
         self.config = config
         self.dry_run = dry_run
         self.capital = capital  # USDC budget for volume farming
+        self.risk_coordinator = risk_coordinator
 
         vf_cfg = config.get("volume_farming", {})
         self.check_interval = vf_cfg.get("check_interval_sec", 30)
@@ -121,7 +124,14 @@ class VolumeFarmingBot:
         if self._tick_count % 10 == 0:
             self._log_status()
 
-        # 6. Save positions every 20 ticks (~10 min)
+        # 6. Report to shared risk coordinator
+        if self.risk_coordinator:
+            self.risk_coordinator.report_vf_pnl(
+                daily_pnl=self.tracker.total_realized_pnl() + self.tracker.total_unrealized_pnl(),
+                exposure=self.tracker.total_exposure(),
+            )
+
+        # 7. Save positions every 20 ticks (~10 min)
         if self._tick_count % 20 == 0:
             self.tracker.save()
 
@@ -187,6 +197,22 @@ class VolumeFarmingBot:
                 # Fee rate for this market
                 fee_rate = estimate_fee_rate(pos.entry_price, pos.category)
 
+                # Check bid-side liquidity drain
+                try:
+                    ob = self.client.get_orderbook(pos.token_id)
+                    if ob and ob.bids:
+                        bid_depth = sum(
+                            float(b.price) * float(b.size) for b in ob.bids
+                            if float(b.price) >= float(ob.bids[0].price) * 0.97
+                        )
+                        if bid_depth < 50:  # Less than $50 near top-of-book
+                            logger.warning(
+                                f"Low liquidity ({bid_depth:.0f} USDC) for "
+                                f"{pos.question[:30]}... consider manual exit"
+                            )
+                except Exception:
+                    pass
+
                 # Merge category-specific overrides into stop-loss config
                 effective_config = self._get_effective_config(pos.category)
 
@@ -240,6 +266,13 @@ class VolumeFarmingBot:
     def _refresh_and_enter(self):
         """Scan markets and enter new positions."""
         self.last_market_refresh = time.time()
+
+        # Check shared risk coordinator first (global pause, combined limits)
+        if self.risk_coordinator:
+            allowed, reason = self.risk_coordinator.can_trade("vf")
+            if not allowed:
+                logger.warning(f"SharedRisk blocked: {reason}")
+                return
 
         # Check VaR before looking for new positions
         can_add, var_pct = check_portfolio_var(

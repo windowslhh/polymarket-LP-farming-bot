@@ -148,3 +148,10 @@ capital_allocation:
   lp_farming_pct: 0.80              # 80% for LP market-making ($400/$500)
   volume_farming_pct: 0.10          # 10% for volume farming ($50/$500)
   reserve_pct: 0.10                 # 10% buffer ($50/$500)
+
+# ═══════════════════════════════════════════════════════════
+# Shared risk management (cross-bot coordination)
+# ═══════════════════════════════════════════════════════════
+shared_risk:
+  global_daily_loss_limit: 15.0     # Combined LP+Volume daily loss pause: $15
+  max_total_exposure_pct: 0.90      # Max 90% of capital deployed across both bots

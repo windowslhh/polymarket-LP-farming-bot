@@ -301,5 +301,74 @@ class TestPositionPnL:
         assert not pos.is_price_stale(max_stale_sec=300)
 
 
+# ───────────────── Shared Risk Coordinator ─────────────────
+
+from src.shared_risk import SharedRiskCoordinator
+
+
+class TestSharedRisk:
+    def _make_coordinator(self, **overrides):
+        config = {
+            "shared_risk": {
+                "global_daily_loss_limit": 15.0,
+                "max_total_exposure_pct": 0.90,
+            },
+            "capital_allocation": {
+                "lp_farming_pct": 0.80,
+                "volume_farming_pct": 0.10,
+            },
+        }
+        config.update(overrides)
+        return SharedRiskCoordinator(config, total_capital=500.0)
+
+    def test_normal_trading_allowed(self):
+        coord = self._make_coordinator()
+        allowed, reason = coord.can_trade("vf")
+        assert allowed
+
+    def test_combined_loss_triggers_pause(self):
+        coord = self._make_coordinator()
+        coord.report_lp_pnl(daily_pnl=-8.0, exposure=200)
+        coord.report_vf_pnl(daily_pnl=-8.0, exposure=30)
+        # Combined: -16 exceeds -15 limit
+        allowed, reason = coord.can_trade("vf")
+        assert not allowed
+        assert "Global pause" in reason
+
+    def test_exposure_limit(self):
+        coord = self._make_coordinator()
+        # Report exposure near 90% of 500 = 450
+        coord.report_lp_pnl(daily_pnl=0, exposure=400)
+        coord.report_vf_pnl(daily_pnl=0, exposure=60)
+        # Total: 460 >= 450
+        allowed, reason = coord.can_trade("vf")
+        assert not allowed
+        assert "exposure" in reason.lower()
+
+    def test_vf_budget_limit(self):
+        coord = self._make_coordinator()
+        coord.report_vf_pnl(daily_pnl=0, exposure=55)
+        # VF budget = 500 * 0.10 = 50, exposure 55 > 50
+        allowed, reason = coord.can_trade("vf")
+        assert not allowed
+        assert "VF exposure" in reason
+
+    def test_lp_not_blocked_by_vf_budget(self):
+        coord = self._make_coordinator()
+        coord.report_vf_pnl(daily_pnl=0, exposure=55)
+        # LP should still be allowed (VF budget check only applies to VF)
+        allowed, reason = coord.can_trade("lp")
+        assert allowed
+
+    def test_status_report(self):
+        coord = self._make_coordinator()
+        coord.report_lp_pnl(daily_pnl=-3.0, exposure=200)
+        coord.report_vf_pnl(daily_pnl=-2.0, exposure=40)
+        status = coord.get_status()
+        assert status["combined_daily_pnl"] == -5.0
+        assert status["total_exposure"] == 240
+        assert not status["global_pause"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
