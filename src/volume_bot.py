@@ -129,11 +129,23 @@ class VolumeFarmingBot:
                 # Get current price
                 current_price = self._get_midpoint(pos.token_id)
                 if current_price is None or current_price <= 0:
+                    # Check if price is stale (no update for 5+ min)
+                    if pos.price_history:
+                        last_update = pos.price_history[-1][0]
+                        stale_sec = time.time() - last_update
+                        if stale_sec > 300:
+                            logger.warning(
+                                f"Stale price ({stale_sec:.0f}s) for {pos.question[:30]}... "
+                                f"using conservative last known price"
+                            )
                     continue
                 pos.update_price(current_price)
 
                 # Fee rate for this market
                 fee_rate = estimate_fee_rate(pos.entry_price, pos.category)
+
+                # Merge category-specific overrides into stop-loss config
+                effective_config = self._get_effective_config(pos.category)
 
                 # Run risk assessment
                 action, reason, updated_since = assess_position_risk(
@@ -143,7 +155,7 @@ class VolumeFarmingBot:
                     price_history=pos.price_history,
                     below_ev_since=pos.below_ev_since,
                     days_to_expiry=pos.days_to_expiry,
-                    config=self.sl_config,
+                    config=effective_config,
                 )
                 pos.below_ev_since = updated_since
 
@@ -364,7 +376,13 @@ class VolumeFarmingBot:
             logger.error(f"Failed to enter position: {e}")
 
     def _exit_position(self, pos: VolumePosition, reason: str):
-        """Exit a position with aggressive limit order."""
+        """Exit a position with tiered aggressive limit orders.
+
+        Tiered exit strategy:
+        - Tier 1: best_bid (aggressive but fair price)
+        - If not filled within 30s: cancel and retry at best_bid - 1¢
+        - If still not filled after 60s total: force exit (cross spread)
+        """
         if self.dry_run:
             logger.info(
                 f"[DRY] EXIT {pos.question[:40]}... "
@@ -375,13 +393,12 @@ class VolumeFarmingBot:
             return
 
         try:
-            # Get best bid for aggressive limit sell
             ob = self.client.get_orderbook(pos.token_id)
             if ob.bids:
-                # Place 1 tick below best bid for fast fill
-                sell_price = round(ob.bids[0].price - 0.01, 2)
+                # Tier 1: sell at best bid for immediate fill
+                sell_price = round(ob.bids[0].price, 2)
             else:
-                sell_price = round(pos.current_price - 0.02, 2)
+                sell_price = round(pos.current_price - 0.01, 2)
 
             sell_price = max(0.01, sell_price)
 
@@ -405,8 +422,37 @@ class VolumeFarmingBot:
             )
         except Exception as e:
             logger.error(f"Failed to exit position: {e}")
-            # Try force exit
             self._force_exit(pos)
+
+    def _check_exit_orders(self):
+        """Check pending exit orders and escalate if not filled."""
+        for pos in self.tracker.get_open_positions():
+            if pos.status != "exiting" or not pos.exit_order_time:
+                continue
+
+            elapsed = time.time() - pos.exit_order_time
+
+            # Tier 2: after 30s, cancel and retry lower
+            if 30 < elapsed <= 60:
+                try:
+                    if pos.exit_order_id:
+                        self.client.cancel_order(pos.exit_order_id)
+                    ob = self.client.get_orderbook(pos.token_id)
+                    sell_price = round(ob.bids[0].price - 0.01, 2) if ob.bids else round(pos.current_price - 0.02, 2)
+                    sell_price = max(0.01, sell_price)
+                    result = self.client.place_limit_order(
+                        token_id=pos.token_id, price=sell_price,
+                        size=round(pos.size_shares, 2), side="SELL",
+                    )
+                    pos.exit_order_id = result.get("orderID", result.get("id", "unknown"))
+                    logger.info(f"Exit tier 2: {pos.question[:30]}... @ {sell_price:.4f}")
+                except Exception as e:
+                    logger.error(f"Exit tier 2 failed: {e}")
+
+            # Tier 3: after 60s, force exit
+            elif elapsed > 60:
+                logger.warning(f"Exit timeout, forcing: {pos.question[:30]}...")
+                self._force_exit(pos)
 
     def _reduce_position(self, pos: VolumePosition, reason: str):
         """Reduce position by half."""
@@ -460,6 +506,14 @@ class VolumeFarmingBot:
         except Exception as e:
             logger.error(f"Force exit failed: {e}")
             pos.status = "open"  # Retry next tick
+
+    def _get_effective_config(self, category: str) -> dict:
+        """Merge category-specific overrides into base stop-loss config."""
+        config = dict(self.sl_config)
+        overrides = self.config.get("volume_farming", {}).get("category_overrides", {})
+        if category in overrides:
+            config.update(overrides[category])
+        return config
 
     def _get_midpoint(self, token_id: str) -> float | None:
         """Get current price from WebSocket or HTTP."""

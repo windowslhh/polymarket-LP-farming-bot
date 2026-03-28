@@ -98,7 +98,11 @@ def compute_stop_loss_levels(
     # p*(1-entry) - (1-p)*entry - fee*entry = 0
     # p - p*entry - entry + p*entry - fee*entry = 0
     # p = entry*(1 + fee)
-    ev_threshold = entry_price * (1.0 + fee_rate)
+    # Round-trip breakeven: need exit proceeds > entry cost
+    # entry_cost = entry_price * (1 + fee_rate)
+    # exit_proceeds = exit_price * (1 - fee_rate)
+    # breakeven: exit_price = entry_price * (1 + fee_rate) / (1 - fee_rate)
+    ev_threshold = entry_price * (1.0 + fee_rate) / (1.0 - fee_rate)
     ev_threshold = min(ev_threshold, 0.999)  # Clamp
 
     # Layer 2: Dynamic drawdown based on entry probability
@@ -162,7 +166,14 @@ def check_ev_stop_loss(
 
     Returns (should_exit, reason, updated_below_ev_since).
     """
-    p_breakeven = entry_price * (1.0 + fee_rate)
+    # Breakeven must cover both entry AND exit fees (round-trip)
+    # Entry cost: entry_price * (1 + fee_rate)
+    # Exit cost: selling at current_prob also incurs fee_rate
+    # So total cost basis = entry_price * (1 + fee_rate) + exit_fee
+    # For threshold: we need current_prob * (1 - fee_rate) > entry_price * (1 + fee_rate)
+    # => current_prob > entry_price * (1 + fee_rate) / (1 - fee_rate)
+    p_breakeven = entry_price * (1.0 + fee_rate) / (1.0 - fee_rate)
+    p_breakeven = min(p_breakeven, 0.999)  # Clamp
     threshold = p_breakeven - ev_buffer
 
     if current_prob >= threshold:

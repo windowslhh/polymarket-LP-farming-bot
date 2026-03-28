@@ -120,6 +120,17 @@ volume_farming:
   # --- Near-expiry risk ---
   expiry_alert_days: 7              # Extra caution within 7 days of expiry
 
+  # --- Category-specific overrides (optional) ---
+  # More volatile categories get wider tolerances, stable ones tighter
+  category_overrides:
+    Crypto:
+      ev_buffer: 0.08               # Crypto is volatile, wider buffer
+      hard_stop_probability: 0.65   # Wider hard stop for crypto
+    Politics:
+      ev_buffer: 0.07               # Political events can be volatile
+    Sports:
+      ev_buffer: 0.03               # Sports odds are relatively stable
+
   # --- Portfolio risk (VaR) ---
   max_daily_drawdown_pct: 0.05      # Max 5% daily portfolio drawdown
 

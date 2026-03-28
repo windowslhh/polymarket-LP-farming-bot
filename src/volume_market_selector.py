@@ -113,12 +113,18 @@ def select_volume_markets(
         # Fee calculation
         fee_rate = estimate_fee_rate(prob, category)
 
-        # Profitability check
-        # Profit if resolves correctly: (1.0 - entry_price) per share
-        # Cost: entry fee + potential exit fee (2x for round trip)
-        gross_profit = (1.0 - entry_price) * prob
-        total_fees = 2 * fee_rate * entry_price
-        net_profit = gross_profit - total_fees
+        # Profitability check (expected value)
+        # If resolves YES (prob = entry probability): profit = 1.0 - entry_price
+        # If resolves NO (1 - prob): loss = entry_price
+        # Fees: entry fee + exit fee (exit only if we stop-loss before resolution)
+        # For hold-to-resolution: only entry fee + resolution is free
+        entry_fee = fee_rate * entry_price
+        profit_if_yes = 1.0 - entry_price - entry_fee
+        loss_if_no = entry_price + entry_fee
+        expected_value = prob * profit_if_yes - (1.0 - prob) * loss_if_no
+
+        # Also consider stop-loss exit cost (worst case: 2x fees for round trip)
+        net_profit = expected_value - fee_rate * entry_price  # extra exit fee buffer
 
         if net_profit <= 0:
             continue
@@ -214,11 +220,15 @@ def _analyze_orderbook(
     bids = orderbook.get("bids", []) or []
     asks = orderbook.get("asks", []) or []
 
-    # Bid depth (how much we can sell for exit)
-    bid_depth = sum(
-        float(b.get("price", 0)) * float(b.get("size", 0))
-        for b in bids
-    )
+    # Bid depth: only count bids within 3% of best bid (real exit liquidity)
+    best_bid_price = float(bids[0].get("price", 0)) if bids else 0
+    bid_depth = 0.0
+    for b in bids:
+        price = float(b.get("price", 0))
+        size = float(b.get("size", 0))
+        if best_bid_price > 0 and price >= best_bid_price * 0.97:
+            bid_depth += price * size
+        # Skip bids too far from top (not real exit liquidity)
 
     # Spread
     best_bid = float(bids[0].get("price", 0)) if bids else probability - 0.01

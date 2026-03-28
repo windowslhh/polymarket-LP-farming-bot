@@ -397,7 +397,9 @@ def _assess_risk(
 
     # Priority 3: EV stop with persistence (use candle timestamps)
     if ev_stop_enabled:
-        p_breakeven = entry_price * (1.0 + fee_rate)
+        # Round-trip breakeven: entry + exit fees
+        p_breakeven = entry_price * (1.0 + fee_rate) / (1.0 - fee_rate)
+        p_breakeven = min(p_breakeven, 0.999)
         threshold = p_breakeven - ev_buffer
 
         if current_prob < threshold:
