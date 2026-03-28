@@ -5,7 +5,7 @@
 polymarket:
   host: "https://clob.polymarket.com"
   chain_id: 137  # Polygon mainnet
-  signature_type: 0
+  signature_type: 2  # 0=EOA, 1=Magic/email, 2=Browser wallet (OKX/MetaMask)
 
 strategy:
   # Calibrated for $500 USDC total capital

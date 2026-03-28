@@ -15,6 +15,12 @@ from py_clob_client.constants import POLYGON
 # Polygon mainnet contract addresses
 _CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 _USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# Exchange contracts that need USDC + CTF approval for trading
+_EXCHANGE_CONTRACTS = [
+    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",  # CTF Exchange
+    "0xC5d563A36AE78145C45a50134d48A1215220f80a",  # Neg Risk CTF Exchange
+    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",  # Neg Risk Adapter
+]
 _POLYGON_RPCS = [
     "https://polygon-bor-rpc.publicnode.com",
     "https://rpc.ankr.com/polygon",

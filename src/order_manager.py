@@ -2,6 +2,12 @@
 
 Tracks active orders, handles cancel-replace cycles,
 and detects fills for inventory tracking.
+
+Dual-BID strategy: Instead of splitting USDC into YES+NO tokens
+and placing ASK orders, we place BID orders on both YES and NO tokens.
+  - BID on YES token at bid_price  → buy side (uses USDC)
+  - BID on NO token at (1 - ask_price)  → equivalent to selling YES (uses USDC)
+This means both sides only need USDC — no on-chain split/merge needed!
 """
 
 import time
@@ -34,90 +40,64 @@ class OrderManager:
         self.total_fills_buy: float = 0.0
         self.total_fills_sell: float = 0.0
 
-    def ensure_ask_inventory(
-        self,
-        token_id: str,
-        condition_id: str,
-        needed_shares: float,
-        midpoint: float,
-    ) -> bool:
-        """Ensure enough YES tokens exist for ASK orders.
-
-        If balance is insufficient, split USDC → YES + NO tokens.
-        Adds a 20% buffer to reduce how often we need to split.
-
-        Returns True if inventory is ready, False if split failed.
-        """
-        current = self.client.get_conditional_balance(token_id)
-        if current >= needed_shares:
-            return True  # Already have enough
-
-        shortage = needed_shares - current
-        # Add 20% buffer so we don't split again immediately
-        to_split_shares = shortage * 1.2
-        # USDC needed = shares × ~1.0 (1 USDC splits into 1 YES + 1 NO)
-        # Use midpoint to approximate but split 1:1 (1 USDC → 1 YES + 1 NO)
-        to_split_usdc = to_split_shares  # 1 USDC = 1 YES token (always)
-
-        usdc_balance = self.client.get_usdc_balance()
-        if usdc_balance < to_split_usdc:
-            logger.warning(
-                f"Insufficient USDC to split: need ${to_split_usdc:.2f}, "
-                f"have ${usdc_balance:.2f}. Skipping ASK orders."
-            )
-            return False
-
-        logger.info(
-            f"YES balance {current:.0f} < needed {needed_shares:.0f}. "
-            f"Splitting ${to_split_usdc:.2f} USDC..."
-        )
-        return self.client.split_position(condition_id, to_split_usdc)
-
     def update_orders(
         self,
-        token_id: str,
+        yes_token_id: str,
+        no_token_id: str | None,
         quotes: QuotePair,
         condition_id: str | None = None,
         midpoint: float = 0.5,
     ):
-        """Cancel existing orders and place new ones (cancel-replace cycle).
+        """Cancel existing orders and place new ones.
 
-        Before placing ASK orders, checks YES token balance and splits
-        USDC if needed so both sides can be fully funded.
+        Dual-BID strategy:
+          - BID quotes → placed on YES token (buy YES)
+          - ASK quotes → converted to BID on NO token (buy NO = sell YES)
+        Both sides only require USDC collateral.
         """
-        # Step 1: Cancel existing orders for this token
-        self._cancel_token_orders(token_id)
+        # Step 1: Cancel existing orders for YES and NO tokens
+        self._cancel_token_orders(yes_token_id)
+        if no_token_id:
+            self._cancel_token_orders(no_token_id)
 
-        # Step 2: Ensure YES token inventory for ASK orders
-        if quotes.asks and condition_id:
-            total_ask_shares = sum(q.size for q in quotes.asks)
-            self.ensure_ask_inventory(
-                token_id=token_id,
-                condition_id=condition_id,
-                needed_shares=total_ask_shares,
-                midpoint=midpoint,
-            )
-
-        # Step 3: Place new orders
+        # Step 2: Place BID orders on YES token (buy side)
         new_orders = []
-
         for quote in quotes.bids:
-            order = self._place_order(token_id, quote)
+            order = self._place_order(yes_token_id, quote)
             if order:
                 new_orders.append(order)
 
-        for quote in quotes.asks:
-            order = self._place_order(token_id, quote)
-            if order:
-                new_orders.append(order)
+        # Step 3: Place BID orders on NO token (= sell YES side)
+        no_orders = []
+        if no_token_id and quotes.asks:
+            for ask_quote in quotes.asks:
+                # Selling YES at ask_price = Buying NO at (1 - ask_price)
+                no_price = round(1.0 - ask_quote.price, 4)
+                if no_price <= 0.0 or no_price >= 1.0:
+                    logger.warning(f"Invalid NO price {no_price} from ASK {ask_quote.price}, skipping")
+                    continue
+                # Share size: use same USDC notional as the ask
+                # ASK was: sell ask_shares YES at ask_price → notional = ask_shares * ask_price
+                # NO BID: buy no_shares NO at no_price → notional = no_shares * no_price
+                # Keep same USDC notional: no_shares = (ask_shares * ask_price) / no_price
+                usdc_notional = ask_quote.size * ask_quote.price
+                no_shares = round(usdc_notional / no_price, 2)
+                no_quote = Quote(price=no_price, size=no_shares, side="BUY")
+                order = self._place_order(no_token_id, no_quote)
+                if order:
+                    no_orders.append(order)
+        elif not no_token_id and quotes.asks:
+            logger.warning("No complement token ID — cannot place sell-side orders")
 
-        self.active_orders[token_id] = new_orders
+        self.active_orders[yes_token_id] = new_orders
+        if no_token_id:
+            self.active_orders[no_token_id] = no_orders
 
-        bid_count = len(quotes.bids)
-        ask_count = len(quotes.asks)
+        bid_count = len(new_orders)
+        ask_count = len(no_orders)
         logger.info(
-            f"Updated orders for {token_id[:8]}...: "
-            f"{bid_count} bids, {ask_count} asks"
+            f"Updated orders for {yes_token_id[:8]}...: "
+            f"{bid_count} YES bids, {ask_count} NO bids (sell-side)"
         )
 
     def cancel_all_token_orders(self, token_id: str):
