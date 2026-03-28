@@ -136,6 +136,17 @@ class PolymarketClient:
         self._api_creds = self._client.create_or_derive_api_creds()
         self._client.set_api_creds(self._api_creds)
         logger.info("API credentials set successfully")
+        # Refresh CLOB's cached balance — required for proxy wallets
+        # The CLOB server caches balances; without this, proxy wallet
+        # funds show as $0 even though the balance exists on-chain.
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            self._client.update_balance_allowance(
+                params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            logger.debug("CLOB balance cache refreshed")
+        except Exception as e:
+            logger.debug(f"Balance cache refresh skipped: {e}")
 
     def _retry(self, func, *args, **kwargs):
         """Execute with exponential backoff retry."""

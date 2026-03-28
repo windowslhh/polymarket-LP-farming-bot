@@ -22,15 +22,21 @@ strategy:
   market_refresh_interval_sec: 300
 
 risk:
-  # Capital: $500 → usable ~$450 (keep $50 buffer for gas + splits)
-  max_position_per_market: 150  # ~30% of capital per market ($30×2levels×2sides=$120, +buffer)
-  max_total_position: 400       # 80% of $500, leave buffer for splits/gas
-  daily_loss_limit: 10          # 2% of capital ($500×2%=$10); conservative for early stage
-  inventory_skew_limit: 60      # Tighter than default, matches smaller position sizes
+  # Capital: $500 → usable ~$450 (keep $50 buffer)
+  max_position_per_market: 150  # YES+NO combined per market (2×2×$30=$120, +buffer)
+  max_total_position: 400       # All markets combined; leaves $100 buffer
+  daily_loss_limit: 10          # 2% of $500; conservative early-stage limit
+  inventory_skew_limit: 60      # Net YES-NO exposure triggering max skew adjustment
   min_days_to_expiry: 7
   min_probability: 0.15
   max_probability: 0.85
   midpoint_change_pause_pct: 10
+  # Shield depth: USDC depth ahead of our bid in the orderbook
+  shield_depth_low: 100         # < $100 ahead → retreat to 95% of max_spread
+  shield_depth_ok: 300          # >= $300 ahead → safe at 80% of max_spread
+  # Fill rate: fills per hour before widening spread
+  fill_rate_warn: 5             # > 5 fills/hr → widen by +8%
+  fill_rate_danger: 10          # > 10 fills/hr → widen by +15%
 
 market_selection:
   max_markets: 3                # 3 markets × ~$150 each = $450 (fits $500)

@@ -186,7 +186,7 @@ class LPFarmingBot:
                 price_histories=price_histories,
             )
 
-            # Cancel orders and clean up inventory for markets we're no longer in
+            # Cancel orders and clean up for markets we're no longer in
             old_market_map = {m.token_id: m for m in self.active_markets}
             new_tokens = {m.token_id for m in new_markets}
             for token_id, old_market in old_market_map.items():
@@ -199,10 +199,15 @@ class LPFarmingBot:
                 self.ws_client.unsubscribe(token_id)
                 logger.info(f"Exited market {token_id[:8]}...")
 
-            # Subscribe new markets to WebSocket
+            # Register YES/NO token pairs with risk manager and subscribe new markets
             old_tokens = set(old_market_map.keys())
-            for token_id in new_tokens - old_tokens:
-                self.ws_client.subscribe(token_id)
+            for market in new_markets:
+                if market.token_id not in old_tokens:
+                    self.ws_client.subscribe(market.token_id)
+                # Always (re-)register in case of restart
+                self.risk_manager.register_market(
+                    market.token_id, market.complement_token_id
+                )
 
             self.active_markets = new_markets
             self.last_market_refresh = time.time()
@@ -238,15 +243,9 @@ class LPFarmingBot:
 
         if market.reward_info.has_rewards and midpoint > 0:
             max_spread_bps = int(market.reward_info.max_spread * 10000)
-
-            # Airdrop farming strategy: post near OUTER EDGE of reward zone (80% of max_spread)
-            # NOT tight to mid — let competitive bots absorb adverse selection there.
-            # We sit just inside the reward boundary, rarely getting hit, collecting rewards.
-            target_spread = int(max_spread_bps * self.spread_target_pct)
-            # Enforce a minimum spread for safety (don't go tighter than config)
-            effective_spread = max(self.spread_bps, target_spread)
-            # Never exceed max_spread (would lose reward eligibility)
-            effective_spread = min(effective_spread, max_spread_bps)
+            effective_spread = self._calculate_dynamic_spread(
+                market, midpoint, token_id, max_spread_bps
+            )
 
             # Size: enough USDC so every level meets min_shares requirement
             worst_price = (midpoint
@@ -328,6 +327,68 @@ class LPFarmingBot:
         if len(self._price_history[token_id]) > self._max_price_history:
             self._price_history[token_id] = self._price_history[token_id][-self._max_price_history:]
 
+    def _calculate_dynamic_spread(
+        self,
+        market,
+        midpoint: float,
+        token_id: str,
+        max_spread_bps: int,
+    ) -> int:
+        """Dynamically adjust spread target based on shield depth and fill rate.
+
+        Base strategy: outer-edge (80% of max_spread).
+        Adjustments:
+          - Shield depth < $100 ahead of us → widen to 95% (almost at boundary)
+          - Shield depth $100-300 → widen to 88%
+          - Shield depth >= $300 → stay at 80% (well protected)
+          - High fill rate (> fill_rate_warn per hour) → additional widening
+        """
+        # Start at 80% of max_spread
+        base_pct = self.spread_target_pct  # default 0.80
+
+        # --- Shield depth adjustment ---
+        # Estimate our intended bid price at current base_pct
+        tentative_half = max_spread_bps * base_pct / 20000
+        tentative_bid = midpoint - tentative_half
+        shield = self._get_shield_depth(token_id, tentative_bid, "BUY")
+        shield_low = self.config.get("risk", {}).get("shield_depth_low", 100)
+        shield_ok = self.config.get("risk", {}).get("shield_depth_ok", 300)
+
+        if shield < shield_low:
+            base_pct = 0.95   # very little protection → retreat to near boundary
+        elif shield < shield_ok:
+            base_pct = 0.88   # some protection but not enough
+
+        # --- Fill rate adjustment ---
+        fill_adj = self.risk_manager.get_fill_rate_adjustment(token_id)
+        base_pct = min(0.98, base_pct + fill_adj)
+
+        target_spread = int(max_spread_bps * base_pct)
+        effective_spread = max(self.spread_bps, target_spread)   # floor: config min
+        effective_spread = min(effective_spread, max_spread_bps) # cap: reward boundary
+        return effective_spread
+
+    def _get_shield_depth(self, token_id: str, our_price: float, side: str) -> float:
+        """Compute USDC depth between midpoint and our price in the orderbook.
+
+        High depth = competitors are ahead of us = we're shielded from fills.
+        Low depth = we're the most aggressive order = high adverse-selection risk.
+        """
+        try:
+            ob = self.client.get_orderbook(token_id)
+            depth = 0.0
+            if side == "BUY":
+                for bid in ob.bids:
+                    if bid.price > our_price:   # closer to mid than we are
+                        depth += bid.price * bid.size
+            else:
+                for ask in ob.asks:
+                    if ask.price < our_price:   # closer to mid than we are
+                        depth += ask.price * ask.size
+            return depth
+        except Exception:
+            return 999.0   # if we can't check, assume safe (don't widen unnecessarily)
+
     def _get_midpoint(self, token_id: str) -> float:
         """Get midpoint from WebSocket cache or HTTP fallback."""
         ws_mid = self.ws_client.get_midpoint(token_id)
@@ -345,12 +406,21 @@ class LPFarmingBot:
             if not trades:
                 return
 
-            # Build map of market names for logging
-            market_names = {m.token_id: m.question for m in self.active_markets}
+            # Build maps for YES and NO token lookups
+            yes_token_names = {m.token_id: m.question for m in self.active_markets}
+            no_token_to_yes = {
+                m.complement_token_id: m.token_id
+                for m in self.active_markets
+                if m.complement_token_id
+            }
+            # Combined: any token_id (YES or NO) → market question
+            all_token_names = {**yes_token_names}
+            for no_tid, yes_tid in no_token_to_yes.items():
+                all_token_names[no_tid] = yes_token_names.get(yes_tid, "Unknown")
 
             for trade in trades:
                 token_id = trade.get("asset_id", "")
-                if token_id not in market_names:
+                if token_id not in all_token_names:
                     continue
 
                 side = trade.get("side", "").upper()
@@ -360,19 +430,21 @@ class LPFarmingBot:
                 if price <= 0 or size <= 0:
                     continue
 
-                midpoint = self.last_midpoints.get(token_id, price)
+                # For midpoint reference, use the YES token's last midpoint
+                yes_token_id = no_token_to_yes.get(token_id, token_id)
+                midpoint = self.last_midpoints.get(yes_token_id, price)
 
-                # Record in PnL tracker
+                # Record in PnL tracker (use YES token_id as market key)
                 self.pnl_tracker.record_fill(
-                    token_id=token_id,
-                    market_name=market_names.get(token_id, "Unknown"),
+                    token_id=yes_token_id,
+                    market_name=all_token_names.get(token_id, "Unknown"),
                     side=side,
                     price=price,
                     size=size,
                     midpoint=midpoint,
                 )
 
-                # Record in risk manager
+                # Record in risk manager (handles YES/NO routing internally)
                 usdc_amount = price * size
                 self.risk_manager.record_fill(
                     token_id=token_id,

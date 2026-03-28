@@ -113,43 +113,51 @@ def main():
 
     # Wallet diagnostic
     wallet_addr = client.get_wallet_address()
-    logger.info(f"Bot wallet address: {wallet_addr}")
+    funder = os.getenv("FUNDER_ADDRESS")
+    proxy_mode = bool(funder)
 
-    onchain_usdc = client.get_onchain_usdc_balance()
-    native_usdc = client.get_onchain_native_usdc_balance()
+    logger.info(f"Bot signing wallet: {wallet_addr}")
+    if proxy_mode:
+        logger.info(f"Proxy wallet (funder): {funder}")
+
     exchange_usdc = client.get_usdc_balance()
     matic = client.get_matic_balance()
-
-    logger.info(f"On-chain USDC.e balance (Polymarket uses this): ${onchain_usdc:.2f}")
-    logger.info(f"On-chain native USDC balance: ${native_usdc:.2f}")
     logger.info(f"Polymarket exchange USDC: ${exchange_usdc:.2f}")
     logger.info(f"MATIC/POL (gas): {matic:.4f}")
 
-    if native_usdc > 1.0 and onchain_usdc < 1.0 and exchange_usdc < 1.0:
-        logger.error(
-            f"You have ${native_usdc:.2f} native USDC, but Polymarket uses USDC.e! "
-            "You need to swap native USDC → USDC.e on a DEX (e.g. QuickSwap), "
-            "or deposit native USDC through the Polymarket website which handles conversion."
-        )
-        sys.exit(1)
+    if not proxy_mode:
+        # EOA mode: funds must be on-chain in the signing wallet
+        onchain_usdc = client.get_onchain_usdc_balance()
+        native_usdc = client.get_onchain_native_usdc_balance()
+        logger.info(f"On-chain USDC.e: ${onchain_usdc:.2f}")
+        logger.info(f"On-chain native USDC: ${native_usdc:.2f}")
 
-    if exchange_usdc < 1.0 and onchain_usdc > 1.0:
-        logger.warning(
-            "You have USDC.e in your wallet but NOT on Polymarket exchange! "
-            "Go to https://polymarket.com and deposit USDC first, "
-            "or the bot cannot place orders."
-        )
-        sys.exit(1)
-
-    if exchange_usdc < 1.0 and onchain_usdc < 1.0 and native_usdc < 1.0:
-        logger.error(
-            f"No USDC found! Wallet {wallet_addr} has $0. "
-            "Please transfer USDC (Polygon) to this address."
-        )
-        sys.exit(1)
+        if native_usdc > 1.0 and onchain_usdc < 1.0 and exchange_usdc < 1.0:
+            logger.error(
+                f"You have ${native_usdc:.2f} native USDC, but Polymarket uses USDC.e! "
+                "Swap on QuickSwap or deposit through polymarket.com."
+            )
+            sys.exit(1)
+        if exchange_usdc < 1.0 and onchain_usdc > 1.0:
+            logger.warning(
+                "USDC.e is in your wallet but not on Polymarket exchange. "
+                "Deposit at polymarket.com first."
+            )
+            sys.exit(1)
+        if exchange_usdc < 1.0 and onchain_usdc < 1.0 and native_usdc < 1.0:
+            logger.error(f"No USDC found in wallet {wallet_addr}. Transfer USDC (Polygon) first.")
+            sys.exit(1)
+    else:
+        # Proxy mode: funds are in the proxy wallet, EOA on-chain balance is irrelevant
+        if exchange_usdc < 1.0:
+            logger.error(
+                f"Polymarket exchange shows $0. Proxy wallet: {funder}\n"
+                "Check that you deposited USDC at polymarket.com with this wallet."
+            )
+            sys.exit(1)
 
     if matic < 0.001:
-        logger.warning("Very low MATIC balance — may not have enough for gas fees")
+        logger.warning("Very low MATIC/POL balance — gas fees may fail")
 
     # Create and run bot
     bot = LPFarmingBot(client=client, config=config, dry_run=args.dry_run)
